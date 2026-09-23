@@ -58,3 +58,80 @@ def test_settings_read_from_environment(monkeypatch: pytest.MonkeyPatch) -> None
     s = Settings(_env_file=None)  # type: ignore[call-arg]
     assert s.xmpp_jid == "env@example.com"
     assert s.xmpp_port == 5269
+
+
+# --- agent identity / channel settings --------------------------------------
+
+
+def test_jid_template_is_expanded() -> None:
+    s = _settings(
+        xmpp_jid="{agent}.{host}@example.com",
+        xmpp_agent_name="Reviewer",
+        xmpp_agent_host="host1",
+    )
+    assert s.xmpp_jid == "reviewer.host1@example.com"
+
+
+def test_jid_template_from_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("XMPP_JID", "{agent}@{host}")
+    monkeypatch.setenv("XMPP_PASSWORD", "pw")
+    monkeypatch.setenv("XMPP_AGENT_NAME", "myagent")
+    monkeypatch.setenv("XMPP_AGENT_HOST", "host1.foo")
+    s = Settings(_env_file=None)  # type: ignore[call-arg]
+    assert s.xmpp_jid == "myagent@host1.foo"
+
+
+def test_jid_template_without_agent_name_fails() -> None:
+    with pytest.raises(ValidationError, match="XMPP_AGENT_NAME"):
+        _settings(xmpp_jid="{agent}@example.com")
+
+
+@pytest.mark.parametrize("bad", ["example.com", "{agnet}@example.com", "a@b@c"])
+def test_invalid_jid_fails(bad: str) -> None:
+    with pytest.raises(ValidationError):
+        _settings(xmpp_jid=bad, xmpp_agent_name="x")
+
+
+def test_nick_defaults_to_agent_name() -> None:
+    s = _settings(xmpp_agent_name="Reviewer")
+    assert s.xmpp_nick == "Reviewer"
+
+
+def test_explicit_nick_beats_agent_name(monkeypatch: pytest.MonkeyPatch) -> None:
+    assert _settings(xmpp_agent_name="Reviewer", xmpp_nick="rev").xmpp_nick == "rev"
+    monkeypatch.setenv("XMPP_NICK", "from-env")
+    assert _settings(xmpp_agent_name="Reviewer").xmpp_nick == "from-env"
+
+
+def test_agent_id_falls_back_to_claude_session_id(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "sess-123")
+    assert _settings().xmpp_agent_id == "sess-123"
+    monkeypatch.setenv("XMPP_AGENT_ID", "explicit")
+    assert _settings().xmpp_agent_id == "explicit"
+
+
+def test_display_name_precedence() -> None:
+    assert _settings().display_name == "bot"  # localpart
+    assert _settings(xmpp_agent_name="Rev").display_name == "Rev"
+    assert _settings(xmpp_agent_name="Rev", xmpp_display_name="Code Reviewer").display_name == (
+        "Code Reviewer"
+    )
+
+
+def test_auto_join_rooms_split() -> None:
+    s = _settings(xmpp_auto_join="agents@conf.example.com, ops@conf.example.com")
+    assert s.auto_join_rooms == ["agents@conf.example.com", "ops@conf.example.com"]
+    assert _settings().auto_join_rooms == []
+
+
+def test_nick_explicitness_survives_defaulting(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Defaulting the nick must not make it look configured.
+
+    pydantic v2 counts a validator's own assignment as "set", so
+    model_fields_set can't answer this after validation — which once meant
+    room nicks never followed a rename.
+    """
+    assert _settings(xmpp_agent_name="Rev").nick_is_explicit is False
+    assert _settings(xmpp_agent_name="Rev", xmpp_nick="rev").nick_is_explicit is True
+    monkeypatch.setenv("XMPP_NICK", "from-env")
+    assert _settings(xmpp_agent_name="Rev").nick_is_explicit is True

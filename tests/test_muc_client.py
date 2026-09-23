@@ -126,3 +126,46 @@ async def test_room_jids_are_canonicalised_everywhere(
     assert c.room_occupants(mixed) == []
     c.leave_room(mixed)
     assert not c.is_joined(mixed)
+
+
+async def test_disconnect_after_a_start_timeout_is_quiet() -> None:
+    """wait_for() cancels the readiness future; .exception() would then raise."""
+    c = _client()
+    c._ready.cancel()
+    c._on_disconnected("stream closed")  # must not raise CancelledError
+
+
+async def test_a_room_is_remembered_after_leaving(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Knowing a JID is a room (not a person) is what stops `reply` sending a
+    1:1 chat to a bare room JID, which the service just drops."""
+    c = _client()
+    muc = c.xmpp.plugin["xep_0045"]
+
+    async def fake_join(room, nick, **kw):
+        muc.our_nicks.setdefault(None, {})[room] = nick
+
+    monkeypatch.setattr(muc, "join_muc_wait", fake_join)
+    monkeypatch.setattr(muc, "get_roster", lambda room: [])
+    monkeypatch.setattr(muc, "leave_muc", lambda room, nick: None)
+
+    await c.join_room("Probe@Conference.XMPP.test", "bot")
+    c.leave_room("Probe@Conference.XMPP.test")
+    assert not c.is_joined("probe@conference.xmpp.test")
+    assert c.is_known_room("Probe@Conference.XMPP.test")  # canonicalised too
+
+
+async def test_a_confirmed_rename_refreshes_our_presence(monkeypatch: pytest.MonkeyPatch) -> None:
+    """After a 303, re-announce under the new nick.
+
+    ejabberd re-broadcasts the presence we *joined* with under the new nick,
+    so without this, occupants keep seeing the old <agent name>.
+    """
+    c = _client()
+    c._joined_rooms[ROOM] = "old-nick"
+    sent: list[str | None] = []
+    monkeypatch.setattr(c.xmpp, "send_presence", lambda pto=None, **kw: sent.append(pto))
+    pres = c.xmpp.make_presence(pfrom=f"{ROOM}/old-nick", pto="bot@xmpp.test/r")
+    pres["muc"]["status_codes"] = {110, 303}
+    pres["muc"]["item_nick"] = "new-nick"
+    c._on_muc_self_presence(pres)
+    assert sent == [f"{ROOM}/new-nick"]

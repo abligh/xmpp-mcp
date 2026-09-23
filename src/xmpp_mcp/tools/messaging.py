@@ -17,9 +17,17 @@ def register(mcp: FastMCP) -> None:
     """Register direct-messaging tools on the FastMCP app."""
 
     @mcp.tool
-    def send_message(
+    async def send_message(
         ctx: Context,
-        to: Annotated[str, Field(description="Recipient bare JID, e.g. alice@example.com")],
+        to: Annotated[
+            str,
+            Field(
+                description=(
+                    "Recipient: a JID (alice@example.com) or the friendly name / "
+                    "agent ID of a peer shown by list_agents"
+                )
+            ),
+        ],
         body: Annotated[str, Field(description="Message text to send")],
         security_label: Annotated[
             str | None,
@@ -32,12 +40,20 @@ def register(mcp: FastMCP) -> None:
             ),
         ] = None,
     ) -> dict[str, Any]:
-        """Send a 1:1 chat message to an XMPP user.
+        """Send a 1:1 chat message to an XMPP user or agent.
 
-        For M-Link servers that enforce security labels, pass `security_label`
-        with a selector obtained from `list_security_labels`.
+        `to` may be a name rather than a JID; it must identify exactly one
+        peer. For M-Link servers that enforce security labels, pass
+        `security_label` with a selector obtained from `list_security_labels`.
+
+        Async so it runs on the event loop: resolving a name reads presence
+        state that the XML stream updates on that loop.
         """
         xmpp = get_xmpp(ctx)
+        try:
+            to = xmpp.resolve_address(to)
+        except XMPPError as exc:
+            raise ToolError(str(exc)) from exc
         label = None
         if security_label:
             try:
