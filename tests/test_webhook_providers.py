@@ -170,6 +170,13 @@ def test_github_summaries() -> None:
     assert gh.summarise(run, {"X-GitHub-Event": "workflow_run"}, "/") == (
         "GitHub workflow_run.completed: CI completed/failure https://r"
     )
+    # Missing fields are left out, never rendered as "None"; a PR's number
+    # falls back to the top-level one GitHub also sends.
+    sparse = {"action": "opened", "number": 42, "pull_request": {"title": "T"}}
+    assert gh.summarise(sparse, {"X-GitHub-Event": "pull_request"}, "/") == (
+        'GitHub pull_request.opened: #42 "T"'
+    )
+    assert gh.summarise({"issue": {}}, {"X-GitHub-Event": "issues"}, "/") == "GitHub issues"
 
 
 def test_gitlab_summaries() -> None:

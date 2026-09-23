@@ -56,11 +56,10 @@ class GitHubProvider(Provider):
 
         detail = ""
         if event in ("pull_request", "pull_request_review", "pull_request_review_comment"):
-            pr = obj(payload, "pull_request")
-            detail = f'#{pr.get("number")} "{pr.get("title")}" {pr.get("html_url", "")}'
+            # pull_request events also carry the number at the top level.
+            detail = _item(obj(payload, "pull_request"), get(payload, "number"))
         elif event in ("issues", "issue_comment"):
-            issue = obj(payload, "issue")
-            detail = f'#{issue.get("number")} "{issue.get("title")}" {issue.get("html_url", "")}'
+            detail = _item(obj(payload, "issue"))
         elif event == "push":
             detail = (
                 f'{get(payload, "ref")}: {count(get(payload, "commits"))} commit(s) '
@@ -75,3 +74,14 @@ class GitHubProvider(Provider):
 
         line = head + (f": {detail.strip()}" if detail.strip() else "")
         return line + (f" (by {who})" if who else "")
+
+
+def _item(item: dict[str, Any], number: Any = None) -> str:
+    """'#12 "title" url' for a PR or issue, leaving out whatever is missing."""
+    number = item.get("number", number)
+    title, url = item.get("title"), item.get("html_url")
+    return " ".join(part for part in (
+        f"#{number}" if number is not None else "",
+        f'"{title}"' if title is not None else "",
+        str(url) if url else "",
+    ) if part)
