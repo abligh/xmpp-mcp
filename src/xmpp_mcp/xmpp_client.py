@@ -15,8 +15,9 @@ from collections import deque
 from datetime import datetime, timezone
 from typing import Any
 
-from slixmpp import ClientXMPP
-from slixmpp.exceptions import IqError, IqTimeout
+from slixmpp import JID, ClientXMPP
+from slixmpp.exceptions import IqError, IqTimeout, PresenceError
+from slixmpp.jid import InvalidJID
 
 from .config import Settings
 from .security_labels import SEC_LABEL_NS
@@ -30,6 +31,27 @@ class XMPPError(RuntimeError):
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def room_key(room: str) -> str:
+    """Canonical key for a room: the prepped, case-folded bare JID.
+
+    Room JIDs compare case-insensitively (RFC 7622), so every room API has to
+    agree on one spelling — otherwise ``join_room("Room@Conf.Example")``
+    succeeds while every later call with the same string reports "not joined".
+    """
+    return parse_jid(room, "room JID").bare
+
+
+def parse_jid(value: str, what: str = "JID") -> JID:
+    """Parse ``value`` as a JID (RFC 7622), raising :class:`XMPPError` if invalid."""
+    try:
+        jid = JID(value)
+    except InvalidJID as exc:
+        raise XMPPError(f"Invalid {what} {value!r}: {exc}") from exc
+    if not jid.domain:
+        raise XMPPError(f"Invalid {what} {value!r}: missing domain")
+    return jid
 
 
 def _read_displaymarking(msg: Any) -> str | None:
@@ -112,6 +134,8 @@ class XMPPClient:
         # raised by xep_0045 for the same stanza, so subscribing to both
         # doubles every MUC line in the inbox. Subscribe once.
         self.xmpp.add_event_handler("message", self._on_message)
+        # The room, not us, decides our nick (XEP-0045 §7.2.9/§7.6).
+        self.xmpp.add_event_handler("groupchat_presence", self._on_muc_self_presence)
         # Pubsub notification events. slixmpp fires `pubsub_publish` /
         # `pubsub_retract` once *per item*; the handler dedupes by msg id and
         # walks every item in one pass.
@@ -198,6 +222,24 @@ class XMPPClient:
                 }
             )
 
+    def _on_muc_self_presence(self, pres: Any) -> None:
+        """Keep ``_joined_rooms`` in step with the nick the room gives us.
+
+        Status code 110 marks our own presence (XEP-0045 §7.2.3); 303 means
+        the room renamed us, in which case the new nick is in the item. Our
+        self-echo filter compares against this value.
+        """
+        codes = pres["muc"]["status_codes"]
+        if 110 not in codes:
+            return
+        room = pres["from"].bare
+        if room not in self._joined_rooms:
+            return
+        nick = pres["muc"]["item_nick"] if 303 in codes else pres["from"].resource
+        if nick and nick != self._joined_rooms[room]:
+            logger.info("Nick in %s is now %r (was %r)", room, nick, self._joined_rooms[room])
+            self._joined_rooms[room] = nick
+
     # --- messaging ------------------------------------------------------------
 
     def send_chat(self, to: str, body: str, label: Any = None) -> None:
@@ -209,6 +251,7 @@ class XMPPClient:
 
     def send_groupchat(self, room: str, body: str, label: Any = None) -> None:
         """Send a message to a MUC room. ``label`` is an optional raw XEP-0258 element."""
+        room = room_key(room)
         if room not in self._joined_rooms:
             raise XMPPError(f"Not joined to room {room} — call join_room first")
         msg = self.xmpp.make_message(mto=room, mbody=body, mtype="groupchat")
@@ -281,8 +324,15 @@ class XMPPClient:
     # --- presence & roster ----------------------------------------------------
 
     def set_presence(self, show: str | None = None, status: str | None = None) -> None:
-        """Update the bot's presence. ``show`` is one of chat/away/dnd/xa or None."""
+        """Update the bot's presence. ``show`` is one of chat/away/dnd/xa or None.
+
+        The broadcast (RFC 6121 §4.4) only reaches roster contacts; room
+        occupants see a change only if it is also sent as directed presence
+        to our occupant JID in each room (XEP-0045 §7.7).
+        """
         self.xmpp.send_presence(pshow=show, pstatus=status)
+        for room, nick in self._joined_rooms.items():
+            self.xmpp.send_presence(pto=f"{room}/{nick}", pshow=show, pstatus=status)
 
     def get_roster(self) -> list[dict[str, Any]]:
         """Return the current roster as a list of contact dicts."""
@@ -325,6 +375,7 @@ class XMPPClient:
         Tools that want history can query a MAM archive explicitly.
         """
         nick = nick or self._settings.xmpp_nick
+        room = room_key(room)
         muc = self.xmpp.plugin["xep_0045"]
         try:
             await muc.join_muc_wait(
@@ -333,13 +384,24 @@ class XMPPClient:
                 maxstanzas=0,
                 timeout=self._settings.xmpp_connect_timeout,
             )
-        except (IqError, IqTimeout, asyncio.TimeoutError) as exc:
+        except (PresenceError, IqError, IqTimeout, asyncio.TimeoutError) as exc:
+            # PresenceError covers the MUC-level refusals: nick conflict,
+            # members-only, banned, password required (XEP-0045 §7.2.x).
             raise XMPPError(f"Failed to join room {room}: {exc}") from exc
-        self._joined_rooms[room] = nick
-        return {"room": room, "nick": nick, "occupants": self.room_occupants(room)}
+        # The room decides the nick, and it need not be the one we asked for
+        # (§7.2.9 lets the service assign one, and prep can fold ours). Trust
+        # the nick in the self-presence: the self-echo filter compares against
+        # it, so a stale value would push our own messages back at us.
+        self._joined_rooms[room] = muc.our_nicks.get(None, {}).get(room, nick)
+        return {
+            "room": room,
+            "nick": self._joined_rooms[room],
+            "occupants": self.room_occupants(room),
+        }
 
     def leave_room(self, room: str) -> None:
         """Leave a previously joined MUC room."""
+        room = room_key(room)
         nick = self._joined_rooms.pop(room, None)
         if nick is None:
             raise XMPPError(f"Not joined to room {room}")
@@ -347,20 +409,32 @@ class XMPPClient:
 
     def room_occupants(self, room: str) -> list[dict[str, Any]]:
         """Return occupants of a joined room with role/affiliation where known."""
+        room = room_key(room)
         if room not in self._joined_rooms:
             raise XMPPError(f"Not joined to room {room} — call join_room first")
         muc = self.xmpp.plugin["xep_0045"]
         occupants: list[dict[str, Any]] = []
         for nick in muc.get_roster(room):
+            # get_jid_property returns a slixmpp JID object for "jid" (only in
+            # rooms that disclose real JIDs) — stringify it, or the tool result
+            # is not JSON-serialisable and loses its structured content.
+            real = muc.get_jid_property(room, nick, "jid")
             occupants.append(
                 {
                     "nick": nick,
-                    "role": muc.get_jid_property(room, nick, "role"),
-                    "affiliation": muc.get_jid_property(room, nick, "affiliation"),
-                    "jid": muc.get_jid_property(room, nick, "jid") or "",
+                    "role": muc.get_jid_property(room, nick, "role") or "",
+                    "affiliation": muc.get_jid_property(room, nick, "affiliation") or "",
+                    "jid": str(real) if real else "",
                 }
             )
         return occupants
+
+    def is_joined(self, room: str) -> bool:
+        return room_key(room) in self._joined_rooms
+
+    def nick_in(self, room: str) -> str | None:
+        """Our nick in ``room``, or ``None`` if not joined."""
+        return self._joined_rooms.get(room_key(room))
 
     @property
     def joined_rooms(self) -> list[str]:
