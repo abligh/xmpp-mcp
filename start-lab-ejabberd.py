@@ -42,8 +42,12 @@ ACCOUNTS = {
     "bob":   "bobpw",
     "carol": "carolpw",
     "admin": "adminpw",
+    # The global webhook-to-XMPP relay (scripts/webhook_relay.py) logs in as this.
+    "webhook": "webhookpw",
 }
-ROOMS = ("r1", "r2", "r3")
+# r1-r3 are the test rooms; "agents" is the shared directory room every
+# channel-mode agent joins (XMPP_AUTO_JOIN) so list_agents sees the whole fleet.
+ROOMS = ("r1", "r2", "r3", "agents")
 MUC_SERVICE = f"conference.{DOMAIN}"
 
 
@@ -142,6 +146,9 @@ def main() -> None:
     print()
     print("Start Claude Code in this directory:  claude")
     print("(MAM queries via the mam_query tool now actually answer)")
+    print()
+    print("Agents: accounts self-register on first login (XMPP_REGISTER=true);")
+    print(f"        shared directory room is agents@{MUC_SERVICE}")
 
 
 if __name__ == "__main__":

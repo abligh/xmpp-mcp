@@ -342,3 +342,183 @@ def _wait_for_rest_api(handle: OpenfireHandle, timeout: float) -> None:
             last = str(exc)
         time.sleep(1.0)
     raise RuntimeError(f"REST API never returned JSON — last: {last}")
+
+
+# --- ejabberd lab (channel / multi-agent suites) ---------------------------
+#
+# The agent-channel tests need XEP-0077 in-band registration (each agent
+# creates its own templated account) and non-anonymous rooms — both are
+# configured in the ejabberd lab, not the Openfire one. The two labs bind the
+# same host ports, so they can't run in the same pytest session:
+# ``pytest_collection_modifyitems`` below drops the ejabberd tests whenever
+# Openfire tests are selected too. Run them with ``pytest -m ejabberd``.
+
+_EJ_COMPOSE = _COMPOSE_DIR / "ejabberd" / "docker-compose.yml"
+_EJ_CONTAINER = "xmpp-mcp-ej-1"
+
+
+@dataclass
+class EjabberdHandle:
+    host: str = "127.0.0.1"
+    c2s_port: int = 5222
+    domain: str = "xmpp.test"
+    muc_service: str = "conference.xmpp.test"
+    container: str = _EJ_CONTAINER
+    accounts: dict[str, Account] = field(
+        default_factory=lambda: {
+            name: Account(name, f"{name}pw")
+            for name in ("alice", "bob", "carol", "webhook")
+        }
+    )
+    # Every templated agent account self-registers with this password.
+    agent_password: str = "agentpw"
+
+    def room_jid(self, name: str) -> str:
+        return f"{name}@{self.muc_service}"
+
+    def raw(self, name: str) -> RawXMPPClient:
+        acct = self.accounts[name]
+        return RawXMPPClient(acct.jid, acct.password, self.host, self.c2s_port)
+
+
+@pytest.hookimpl(trylast=True)  # after -m / -k have deselected what they will
+def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
+    ej = [i for i in items if i.get_closest_marker("ejabberd")]
+    openfire_docker = [
+        i for i in items if i.get_closest_marker("docker") and not i.get_closest_marker("ejabberd")
+    ]
+    if ej and openfire_docker:
+        config.hook.pytest_deselected(items=ej)
+        items[:] = [i for i in items if not i.get_closest_marker("ejabberd")]
+
+
+def _container_running(name: str) -> bool:
+    r = subprocess.run(
+        ["docker", "inspect", name, "--format", "{{.State.Running}}"],
+        capture_output=True, text=True, check=False,
+    )
+    return r.stdout.strip() == "true"
+
+
+def _wait_for_ejabberd(handle: EjabberdHandle, timeout: float = 120) -> None:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        r = subprocess.run(
+            ["docker", "inspect", handle.container, "--format", "{{.State.Health.Status}}"],
+            capture_output=True, text=True, check=False,
+        )
+        if r.stdout.strip() == "healthy":
+            _wait_for_tcp(handle.host, handle.c2s_port, timeout=60)
+            return
+        time.sleep(1.0)
+    raise RuntimeError(f"{handle.container} never became healthy")
+
+
+@pytest.fixture(scope="session")
+def ejabberd() -> Iterator[EjabberdHandle]:
+    """The ejabberd lab: reused if already running (start-lab-ejabberd.py), else booted."""
+    handle = EjabberdHandle()
+    started_here = not _container_running(handle.container)
+    subprocess.run(
+        ["docker", "compose", "-f", str(_EJ_COMPOSE), "up", "-d"],
+        check=True, capture_output=True,
+    )
+    try:
+        _wait_for_ejabberd(handle)
+        for acct in handle.accounts.values():
+            # Idempotent: "already registered" is fine.
+            subprocess.run(
+                ["docker", "exec", handle.container, "ejabberdctl", "register",
+                 acct.username, handle.domain, acct.password],
+                capture_output=True, check=False,
+            )
+        yield handle
+    finally:
+        if started_here:
+            subprocess.run(
+                ["docker", "compose", "-f", str(_EJ_COMPOSE), "down", "-v"],
+                check=False, capture_output=True,
+            )
+
+
+@pytest_asyncio.fixture
+async def spawn_agent(ejabberd: EjabberdHandle, tmp_path: Path):
+    """Factory: start a channel-mode xmpp-mcp subprocess as a fresh templated agent.
+
+    ``await spawn_agent("rev")`` → a started :class:`StdioMCP` whose JID is
+    ``rev-<random>.lab@xmpp.test`` (self-registered via XEP-0077). Extra CLI
+    args / env can be passed; ``channel=False`` starts it in plain mode.
+
+    ``claude_name="Reviewer"`` instead runs the agent as if under a Claude
+    Code session of that name: it writes a session file into a private
+    CLAUDE_CONFIG_DIR and uses the canonical ``{session}.{host}`` JID. The
+    returned object's ``session_file`` can be edited to rename the session.
+    Every agent gets its own config dir, so none of them ever sees the Claude
+    Code session this test suite may itself be running under.
+
+    All agents are shut down at the end of the test.
+    """
+    import json
+    import uuid
+
+    from .helpers.stdio_mcp import StdioMCP
+
+    started: list[StdioMCP] = []
+
+    async def _spawn(
+        base: str,
+        *args: str,
+        channel: bool = True,
+        env: dict[str, str] | None = None,
+        name: str | None = None,
+        claude_name: str | None = None,
+    ) -> StdioMCP:
+        agent_name = name or f"{base}-{uuid.uuid4().hex[:6]}"
+        config_dir = tmp_path / f"claude-{agent_name}"
+        (config_dir / "sessions").mkdir(parents=True, exist_ok=True)
+        agent_env = {
+            "XMPP_JID": "{agent}.{host}@" + ejabberd.domain,
+            "XMPP_PASSWORD": ejabberd.agent_password,
+            "XMPP_HOST": ejabberd.host,
+            "XMPP_PORT": str(ejabberd.c2s_port),
+            "XMPP_TLS_INSECURE": "true",
+            "XMPP_AGENT_HOST": "lab",
+            "XMPP_AGENT_ID": f"session-{agent_name}",
+            "CLAUDE_CONFIG_DIR": str(config_dir),
+        }
+        cli = ["--register"]
+        session_file = None
+        if claude_name is None:
+            cli += ["--agent-name", agent_name]
+            jid = f"{agent_name.lower()}.lab@{ejabberd.domain}"
+        else:
+            session_id = str(uuid.uuid4())
+            session_file = config_dir / "sessions" / "424242.json"
+            session_file.write_text(json.dumps({
+                "pid": 424242, "sessionId": session_id, "name": claude_name,
+                "nameSource": "auto", "status": "idle",
+            }))
+            del agent_env["XMPP_AGENT_ID"]
+            agent_env.update({
+                "XMPP_JID": "{session}.{host}@" + ejabberd.domain,
+                "CLAUDE_CODE_SESSION_ID": session_id,  # found by the session-ID scan
+                "XMPP_CLAUDE_SESSION_POLL": "0.5",
+            })
+            jid = f"{session_id}.lab@{ejabberd.domain}"
+            agent_name = claude_name
+        if channel:
+            cli.append("--channel")
+        proc = StdioMCP([*cli, *args], env={**agent_env, **(env or {})},
+                        cwd=tmp_path)  # cwd: no stray .env
+        proc.agent_name = agent_name  # type: ignore[attr-defined]
+        proc.jid = jid  # type: ignore[attr-defined]
+        proc.session_file = session_file  # type: ignore[attr-defined]
+        await proc.start()
+        started.append(proc)
+        return proc
+
+    try:
+        yield _spawn
+    finally:
+        for proc in started:
+            await proc.close()

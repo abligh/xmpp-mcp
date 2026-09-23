@@ -45,4 +45,5 @@ markers = [
     "docker: tests that boot Openfire in Docker via docker compose (deselect with '-m \"not docker\"')",
     "wire: tests that drive dist/xmpp-mcp.exe over real MCP stdio JSON-RPC (subset of docker)",
     "llm: tests that drive a real Anthropic Claude session via the API (needs ANTHROPIC_API_KEY)",
+    "ejabberd: channel / multi-agent tests against the ejabberd lab (run alone: pytest -m ejabberd)",
 ]
