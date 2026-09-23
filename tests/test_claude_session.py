@@ -332,3 +332,99 @@ async def test_an_explicit_nick_is_not_second_guessed(monkeypatch: pytest.Monkey
     monkeypatch.setattr(muc, "join_muc_wait", join)
     with pytest.raises(XMPPError, match="conflict"):
         await c.join_room(ROOM, "exactly-this")
+
+
+# --- presence follows busy/idle ------------------------------------------------
+
+
+def test_session_status_maps_to_presence(tmp_path: Path) -> None:
+    from xmpp_mcp.xmpp_client import _session_presence
+
+    assert _session_presence(read_session(_write(tmp_path, 1, status="busy"))) == ("dnd", "busy")
+    assert _session_presence(read_session(_write(tmp_path, 2, status="idle"))) == (None, "idle")
+    assert _session_presence(None) == (None, None)
+
+
+async def test_busy_idle_is_announced_until_presence_is_set_explicitly(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = _write(tmp_path, 7, status="idle")
+    c = _client(tmp_path)
+    c._joined_rooms = {ROOM: "bridge-cse-abc-18"}
+    sent: list[tuple[str | None, str | None, str | None]] = []
+    monkeypatch.setattr(c.xmpp, "is_connected", lambda: True)
+    monkeypatch.setattr(c.xmpp, "send_presence",
+                        lambda pto=None, pshow=None, pstatus=None: sent.append((pto, pshow, pstatus)))
+    w = SessionWatcher(read_session(path), c._on_claude_session_change)
+
+    _bump(path, status="busy")
+    w.poll()
+    assert sent == [(None, "dnd", "busy"), (f"{ROOM}/bridge-cse-abc-18", "dnd", "busy")]
+
+    c.set_presence("away", "at lunch")  # an explicit choice wins from now on
+    sent.clear()
+    _bump(path, status="idle")
+    w.poll()
+    assert sent == []
+    assert c._presence == ("away", "at lunch")
+
+
+# --- the friendly name travels in the first message ----------------------------
+
+
+async def test_nick_goes_in_the_first_message_to_each_contact(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """XEP-0172 §4.2: the nick accompanies the first message to a contact."""
+    _write(tmp_path, 7, name="Reviewer")
+    c = _client(tmp_path)
+    sent: list[Any] = []
+    monkeypatch.setattr(c.xmpp, "send", sent.append)
+
+    def nick_of(stanza: Any) -> str | None:
+        el = stanza.xml.find("{http://jabber.org/protocol/nick}nick")
+        return el.text if el is not None else None
+
+    c.send_chat("alice@xmpp.test", "one")
+    c.send_chat("alice@xmpp.test/phone", "two")  # same contact, any resource
+    c.send_chat("bob@xmpp.test", "three")
+    assert [nick_of(m) for m in sent] == ["Reviewer", None, "Reviewer"]
+
+    async def no_pep() -> None:
+        return None
+
+    monkeypatch.setattr(c, "_publish_nick", no_pep)
+    monkeypatch.setattr(c.xmpp, "is_connected", lambda: False)
+    await c.rename("Code Reviewer", "user")
+    sent.clear()
+    c.send_chat("alice@xmpp.test", "after the rename")
+    assert nick_of(sent[0]) == "Code Reviewer"  # contacts learn the new name
+
+
+async def test_no_nick_in_a_private_message_to_a_room_occupant(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _write(tmp_path, 7, name="Reviewer")
+    c = _client(tmp_path)
+    c._known_rooms.add(ROOM)
+    sent: list[Any] = []
+    monkeypatch.setattr(c.xmpp, "send", sent.append)
+    c.send_chat(f"{ROOM}/alice", "psst")  # our nick in the room already says who we are
+    assert sent[0].xml.find("{http://jabber.org/protocol/nick}nick") is None
+
+
+async def test_a_nick_in_a_message_names_a_sender_we_cannot_otherwise_see() -> None:
+    """No shared room, no roster: the message's own <nick/> is the only name."""
+    c = _client()
+    got: list[dict[str, Any]] = []
+    c.add_message_listener(got.append)
+    first = c.xmpp.make_message(mto="bot@xmpp.test", mbody="hello", mtype="chat",
+                                mfrom="sess-z.host9@xmpp.test/r")
+    first["nick"]["nick"] = "Zed"
+    c._on_message(first)
+    later = c.xmpp.make_message(mto="bot@xmpp.test", mbody="again", mtype="chat",
+                                mfrom="sess-z.host9@xmpp.test/r")
+    c._on_message(later)  # no nick this time: remembered from the first
+    assert [g["sender_name"] for g in got] == ["Zed", "Zed"]
+    # ...and that name is enough to write back.
+    assert c.resolve_address("zed") == "sess-z.host9@xmpp.test"

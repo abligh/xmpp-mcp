@@ -186,3 +186,35 @@ async def test_envelope_to_a_friendly_name(named_relay, spawn_agent) -> None:
         assert (await resp.json())["routed_by"] == "envelope"
     ev = await bld.next_event()
     assert '"deploy":"done"' in ev["content"] and '"xmpp"' not in ev["content"]
+
+
+# --- names without a shared room; busy/idle; rooms --------------------------------
+
+
+async def test_a_stranger_is_named_by_the_nick_in_its_first_message(spawn_agent) -> None:
+    """No shared room, no roster: XEP-0172's <nick/> still gives a name."""
+    rev = await spawn_agent("rev", claude_name="Reviewer")
+    bld = await spawn_agent("bld", claude_name="Builder")
+    await bld.call("send_message", {"to": rev.jid, "body": "hello stranger"})
+    ev = await rev.next_event()
+    assert ev["meta"]["sender_jid"] == bld.jid        # canonical
+    assert ev["meta"]["sender_name"] == "Builder"     # friendly
+    await rev.call("reply", {"to": "Builder", "message": "hi Builder"})  # and addressable
+    assert (await bld.next_event())["content"] == "hi Builder"
+
+
+async def test_busy_and_idle_show_as_presence(spawn_agent, ejabberd: EjabberdHandle) -> None:
+    room = _directory(ejabberd)
+    rev = await spawn_agent("rev", "--join", room, claude_name="Reviewer")
+    bld = await spawn_agent("bld", "--join", room, claude_name="Builder")
+    for status, expected in (("busy", ("dnd", "busy")), ("idle", ("available", "idle"))):
+        data = json.loads(rev.session_file.read_text())
+        data["status"] = status
+        rev.session_file.write_text(json.dumps(data))
+
+        async def seen(expected=expected):
+            agents = {a["address"]: a for a in (await bld.call("list_agents"))["agents"]}
+            peer = agents.get(rev.jid)
+            return peer and (peer["presence"], peer["status"]) == expected
+
+        await _until(seen)

@@ -128,7 +128,11 @@ receives events while it is running, though.
 > from `--name`; a message sent *by friendly name* arriving as
 > `← xmpp: …` in an idle session, which then answered on its own with
 > `reply`; room posts answered in the room with no self-echo; and a signed
-> GitHub webhook routed by the route table to the name `Alpha`. Not verified:
+> GitHub webhook routed by the route table to the name `Alpha`. Also live:
+> `/rename Reviewer` in one session changed its room nick and the name its
+> peer saw (`name_source: user`) within one poll, with the canonical ID
+> unchanged; the recipient of a message saw `sender`, `sender_jid` *and*
+> `sender_name`; and busy/idle showed as `dnd`/`available`. Not verified:
 > print mode (`-p`) with a long-lived channel.
 
 Don't set `MCP_PROTOCOL_NEGOTIATION=auto` for these sessions. Claude Code
@@ -161,7 +165,7 @@ Claude Code renders that into the session as:
 | `type` | always | `chat`, `normal`, `headline` or `groupchat` |
 | `reply_to` | always | What to pass as `reply(to=…)`: the room for groupchat, otherwise the sender |
 | `sender_jid` | when known | Real bare JID of the sender (hidden for occupants of anonymous rooms) |
-| `sender_name` | when known | The sender's friendly name, if it advertises one |
+| `sender_name` | when known | The sender's friendly name — from its presence if we share a room or roster, else from the XEP-0172 `<nick/>` its first message carried |
 | `room` / `nick` | groupchat | Room bare JID and the speaker's nick |
 | `thread` | if present | RFC 6121 §5.2.5 thread ID; pass it back to `reply` |
 | `security_label` | if present | XEP-0258 display marking |
@@ -180,8 +184,7 @@ Claude its own address, what the attributes mean, and to answer with
 | `list_agents(include_offline?, agents_only?)` | The XMPP `ListAgents`: every roster contact and occupant of every joined room. Each entry has `jid` (canonical address), `agent_id` (internal/session ID), `name` (human-facing), `presence`/`status`, `host`, `is_agent`, `rooms`, and `address` (what to send to). |
 | `get_identity()` | This agent's own JID, name, ID, nick and rooms |
 | `join_room(room_jid, nick?)` / `leave_room(room_jid)` | Manage room membership (auto-join with `--join` / `XMPP_AUTO_JOIN`) |
-| `send_room_message(room_jid, body)` | Post to a joined room |
-| `set_presence(show?, status?)` | e.g. `dnd` + "deep in a refactor"; also sent to every joined room |
+| `set_presence(show?, status?)` | e.g. `dnd` + "deep in a refactor"; also sent to every joined room. Overrides the automatic busy/idle presence from then on |
 | `get_recent_messages` / `search_messages` | Still work in channel mode: every message is buffered as before |
 
 **Discovery.** Presence only flows between roster contacts and between
@@ -253,12 +256,27 @@ republishes its nickname. Peers see the new name, and where it came from, in
 `list_agents` (`name`, `name_source`). `XMPP_DISPLAY_NAME` pins the friendly
 name instead.
 
-The friendly name is advertised three ways: in the `<agent name=…
+The friendly name is advertised four ways: in the `<agent name=…
 name-source=…/>` presence extension (which is what peers who share a room
-see), as the MUC nick, and as a **XEP-0172 User Nickname** published over PEP,
-the standard XMPP home for a self-chosen name. If the nick is taken in a room
-(say two sessions are both called `Reviewer`), the agent joins as
-`Reviewer (host)` instead of failing.
+see); as the MUC nick; as a **XEP-0172 User Nickname** published over PEP,
+the standard XMPP home for a self-chosen name; and, per XEP-0172 §4.2, as a
+`<nick/>` in the **first** message to each contact (again after a rename) —
+so even a peer that shares no room with us gets a name for `sender_name`, and
+can address us by it. Following the same XEP, the nick is never put in
+presence broadcasts. If the nick is taken in a room (say two sessions are
+both called `Reviewer`), the agent joins as `Reviewer (host)` instead of
+failing. All of these are self-asserted: they are for display and for
+addressing, never for the sender gate.
+
+**Presence follows the session's status.** Claude Code records whether the
+session is `busy` (a turn in progress) or `idle`; the agent mirrors that as
+`dnd`/"busy" or available/"idle", so `list_agents` shows who is free.
+Messages to a busy agent are still delivered and wait for its next turn. An
+explicit `set_presence` takes over from then on.
+
+The model is told its canonical address at startup, and only its *starting*
+friendly name — `instructions` are sent once, and a rename would make a
+baked-in name wrong. It calls `get_identity` for the current one.
 
 ### JID templates
 

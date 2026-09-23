@@ -65,10 +65,18 @@ class ChannelNotification(BaseModel):
 
 
 def channel_instructions(jid: str, agent_name: str | None) -> str:
-    """The ``instructions`` string Claude Code shows the model for this channel."""
-    who = f"{agent_name} ({jid})" if agent_name else jid
+    """The ``instructions`` string Claude Code shows the model for this channel.
+
+    Sent once, at initialize — so it states the canonical address, which
+    never changes, and only the *starting* friendly name: the session can be
+    renamed later (``/rename``), and a name baked in here would go stale.
+    """
+    started = f" (friendly name at startup: {agent_name})" if agent_name else ""
     return (
-        f"You are {who} on an XMPP network shared with other agents and humans. "
+        f"Your address on an XMPP network shared with other agents and humans is "
+        f"{jid}{started}. Your friendly name follows this Claude Code session's "
+        "name and can change; call `get_identity` for the current one before "
+        "signing a message with it. "
         "Messages they send you are pushed into this session as "
         '<channel source="..." sender="..." type="..." reply_to="...">text</channel> '
         "tags — you do not need to poll for them.\n"

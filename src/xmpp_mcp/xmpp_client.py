@@ -76,6 +76,22 @@ def parse_jid(value: str, what: str = "JID") -> JID:
     return jid
 
 
+def _session_presence(session: ClaudeSession | None) -> tuple[str | None, str | None]:
+    """XMPP presence for a Claude Code session's status.
+
+    ``busy`` (a turn in progress) becomes ``dnd`` — the RFC 6121 §4.7.2.1
+    value clients show as "busy"; messages are still delivered and simply
+    wait for the next turn. ``idle`` is plain available. Anything else is
+    left alone.
+    """
+    status = session.status if session else None
+    if status == "busy":
+        return "dnd", "busy"
+    if status == "idle":
+        return None, "idle"
+    return None, None
+
+
 def _open_access_form(xmpp: Any) -> Any:
     """XEP-0060 §7.1.5 publish-options: make a PEP node readable by anyone."""
     form = xmpp.plugin["xep_0004"].make_form(ftype="submit")
@@ -142,6 +158,15 @@ class XMPPClient:
             else session.name_source if session and session.name else None
         )
         self._session_watcher: SessionWatcher | None = None
+        # Presence follows the Claude Code session's busy/idle status until an
+        # explicit set_presence says otherwise.
+        self._presence_explicit = False
+        # XEP-0172 §4.2: our nick goes in the *first* message to a contact.
+        # Bare JIDs already told our current name (reset on rename).
+        self._nick_sent: set[str] = set()
+        # Nicks peers told us in their messages (bare JID -> nick): a name
+        # for senders whose presence we never see (no shared room/roster).
+        self._nick_hints: dict[str, str] = {}
         # Rooms whose nick tracks the friendly name (joined without an
         # explicit nick); renamed along with the agent.
         self._nick_follows: set[str] = set()
@@ -311,6 +336,8 @@ class XMPPClient:
             # RFC 6121 §2.2: fetch the roster *before* sending initial
             # presence, so the server knows to send us contacts' presence.
             await self.xmpp.get_roster()
+            if not self._presence_explicit:
+                self._presence = _session_presence(self._settings.claude_session)
             show, status = self._presence
             self.xmpp.send_presence(pshow=show, pstatus=status)
         except (IqError, IqTimeout) as exc:
@@ -335,7 +362,7 @@ class XMPPClient:
                 logger.warning("Re-join of %s after reconnect failed: %s", room, exc)
         if any(self._presence):
             show, status = self._presence
-            self.set_presence(show=show, status=status)
+            self._announce(show, status)
 
     def _on_muc_self_presence(self, pres: Any) -> None:
         """Keep ``_joined_rooms`` in step with the nick the room gives us.
@@ -443,6 +470,12 @@ class XMPPClient:
                 logger.debug("Could not publish XEP-0172 nickname: %s", exc)
 
     def _on_claude_session_change(self, old: ClaudeSession, new: ClaudeSession) -> Any:
+        if new.status != old.status and not self._presence_explicit:
+            # busy/idle becomes presence, so list_agents shows who is free.
+            show, status = _session_presence(new)
+            if (show, status) != self._presence and self.xmpp.is_connected():
+                self._announce(show, status)
+            self._presence = (show, status)
         if new.name and new.name != self.friendly_name:
             return self.rename(new.name, new.name_source)
         if new.name_source != self.name_source and new.name == self.friendly_name:
@@ -461,6 +494,7 @@ class XMPPClient:
         """
         old = self.friendly_name
         self.friendly_name, self.name_source = name, source
+        self._nick_sent.clear()  # tell each contact the new name next time
         logger.info("Friendly name changed: %r -> %r (%s)", old, name, source or "?")
         if not self.xmpp.is_connected():
             return  # the next session announces the new name anyway
@@ -472,9 +506,13 @@ class XMPPClient:
         await self._publish_nick()
 
     def friendly_name_of(self, jid: str) -> str | None:
-        """A peer's friendly name, if it advertises one (or the roster names it)."""
+        """A peer's friendly name: advertised in presence, else in a message, else the roster's.
+
+        All of these are self-asserted (XEP-0172 §7) — for display and for
+        addressing by name, never for deciding whom to trust.
+        """
         bare = JID(jid).bare
-        name = self.presence.agent_name_of(bare)
+        name = self.presence.agent_name_of(bare) or self._nick_hints.get(bare)
         if name:
             return name
         if bare in self._roster_jids:
@@ -502,6 +540,12 @@ class XMPPClient:
             names |= {r["nick"] for r in entry["rooms"]}
             if key in {n.casefold() for n in names if n}:
                 matches.append(entry)
+        # Peers we only know from a message's XEP-0172 nick (no shared room,
+        # not on the roster) are addressable by that name too.
+        known = {m["jid"] for m in matches}
+        for bare, nick in self._nick_hints.items():
+            if nick.casefold() == key and bare not in known:
+                matches.append({"name": nick, "address": bare, "jid": bare})
         if len(matches) == 1:
             return matches[0]["address"]
         if not matches:
@@ -583,6 +627,9 @@ class XMPPClient:
             "thread": msg["thread"] or None,
         }
         real = record["sender_jid"]
+        told = msg.xml.find("{http://jabber.org/protocol/nick}nick")
+        if real and told is not None and (told.text or "").strip() and not is_muc:
+            self._nick_hints[real] = told.text.strip()
         if real:
             record["sender_name"] = self.friendly_name_of(real)
         elif record["occupant"]:
@@ -616,10 +663,16 @@ class XMPPClient:
         self, to: str, body: str, label: Any = None, thread: str | None = None
     ) -> None:
         """Send a 1:1 chat message. ``label`` is an optional raw XEP-0258 element."""
-        parse_jid(to, "recipient JID")
+        target = parse_jid(to, "recipient JID")
         msg = self.xmpp.make_message(mto=to, mbody=body, mtype="chat")
         if thread:
             msg["thread"] = thread
+        # XEP-0172 §4.2: say who we are in the first message to a contact, so
+        # a peer that can't see our presence still gets a readable name. Not
+        # for room occupants (room@service/nick): there the nick is the name.
+        if target.bare not in self._nick_sent and target.bare not in self._known_rooms:
+            msg["nick"]["nick"] = self.friendly_name
+            self._nick_sent.add(target.bare)
         if label is not None:
             msg.appendxml(label)
         msg.send()
@@ -715,6 +768,15 @@ class XMPPClient:
 
     def set_presence(self, show: str | None = None, status: str | None = None) -> None:
         """Update the bot's presence. ``show`` is one of chat/away/dnd/xa or None.
+
+        An explicit presence wins over the automatic busy/idle one derived from
+        the Claude Code session, from now on.
+        """
+        self._presence_explicit = True
+        self._announce(show, status)
+
+    def _announce(self, show: str | None, status: str | None) -> None:
+        """Send presence to contacts and to every joined room.
 
         The broadcast (RFC 6121 §4.4) only reaches roster contacts; room
         occupants see a change only if it is also sent as directed presence
