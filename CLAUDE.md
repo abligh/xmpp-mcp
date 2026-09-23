@@ -141,6 +141,9 @@ tests/integration/       # docker-based E2E (two labs available — see below)
 contrib/prosody/         # optional: mod_auth_xmpp_mcp.lua (server half of
                          #   credentials.py) + README — deployment material,
                          #   not part of the upstreamable core
+  deploy/                # production container: Prosody + certbot (HTTP-01
+                         #   via the host's Apache/Caddy on :80), env-driven
+                         #   config, xmpp-mcp-host-key; see its README
 
 scripts/                 # one-off demo runners (use the test fixtures + an
   demo_chat_search.py    #   in-process FastMCP Client)

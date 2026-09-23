@@ -1,0 +1,92 @@
+#!/bin/bash
+# Let's Encrypt certificates for the two client domains (JABBER_DOMAIN and
+# AGENT_DOMAIN), one certificate each. certbot answers the HTTP-01 challenge
+# itself on this container's port 80, which is published on the host's
+# localhost and reached through the host's Apache.
+#
+#   xmpp-certs obtain   get any certificate that is missing (retrying until it
+#                       works), then import them all into Prosody
+#   xmpp-certs renew    renew whatever is due; re-import and reload if so
+#   xmpp-certs deploy   import the current certificates into Prosody and, if it
+#                       is running, reload it (certbot's deploy hook)
+#
+# Settings (environment): ACME_EMAIL, ACME_STAGING=1 for Let's Encrypt's
+# staging service, ACME_SERVER for any other ACME directory URL.
+
+set -euo pipefail
+
+live=/etc/letsencrypt/live
+domains=("${JABBER_DOMAIN:?}" "${AGENT_DOMAIN:?}")
+
+log() { echo "xmpp-certs: $*" >&2; }
+
+wanted_server() {
+	if [[ -n ${ACME_SERVER:-} ]]; then
+		echo "$ACME_SERVER"
+	elif [[ ${ACME_STAGING:-0} == 1 ]]; then
+		echo "https://acme-staging-v02.api.letsencrypt.org/directory"
+	else
+		echo "https://acme-v02.api.letsencrypt.org/directory"
+	fi
+}
+
+# The ACME server a certificate was issued by, from certbot's renewal config.
+issued_by() {
+	sed -n 's/^server *= *//p' "/etc/letsencrypt/renewal/$1.conf" 2>/dev/null || true
+}
+
+prosody_running() {
+	prosodyctl shell 'server:version()' >/dev/null 2>&1
+}
+
+deploy() {
+	# Copies <domain>/fullchain.pem + privkey.pem to /etc/prosody/certs as
+	# <domain>.crt / .key, readable by the prosody user only.
+	prosodyctl --root cert import "$live"
+	if prosody_running; then
+		prosodyctl reload >/dev/null
+		log "certificates reloaded"
+	fi
+}
+
+obtain() {
+	local server args d extra
+	server=$(wanted_server)
+	args=(certonly --non-interactive --agree-tos --server "$server"
+	      --standalone --preferred-challenges http --http-01-port 80)
+	if [[ -n ${ACME_EMAIL:-} ]]; then
+		args+=(--email "$ACME_EMAIL")
+	else
+		args+=(--register-unsafely-without-email)
+	fi
+	for d in "${domains[@]}"; do
+		extra=()
+		if [[ -f $live/$d/fullchain.pem ]]; then
+			[[ $(issued_by "$d") == "$server" ]] && continue
+			# Issued by another ACME server (e.g. staging, before switching to
+			# production): replace it now rather than when it falls due.
+			log "$d: replacing the certificate from $(issued_by "$d")"
+			extra=(--force-renewal --break-my-certs)
+		fi
+		log "$d: requesting a certificate from $server"
+		# Retry slowly: Let's Encrypt allows only a few failed validations per
+		# hour, and the usual cause (DNS, Apache not forwarding yet) takes a
+		# person to fix.
+		until certbot "${args[@]}" "${extra[@]}" --cert-name "$d" -d "$d"; do
+			log "$d: failed — is http://$d/.well-known/acme-challenge/ forwarded to this container? Retrying in 15 minutes."
+			sleep 900
+		done
+	done
+	deploy
+}
+
+renew() {
+	certbot renew --quiet --deploy-hook "xmpp-certs deploy"
+}
+
+case "${1:-}" in
+	obtain) obtain ;;
+	renew) renew ;;
+	deploy) deploy ;;
+	*) echo "usage: xmpp-certs obtain|renew|deploy" >&2; exit 2 ;;
+esac

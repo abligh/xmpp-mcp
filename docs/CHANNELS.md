@@ -641,7 +641,9 @@ key: `WEBHOOK_XMPP_JID=webhook.host1@agents.example.com`,
 **Server side.** Install `contrib/prosody/mod_auth_xmpp_mcp.lua` and give the
 agents their own virtual host — see
 [`contrib/prosody/README.md`](../contrib/prosody/README.md). The check runs
-inside Prosody: no SASL daemon, no helper process.
+inside Prosody: no SASL daemon, no helper process. For a complete server in
+Docker, with Let's Encrypt certificates, see
+[`contrib/prosody/deploy/`](../contrib/prosody/deploy/README.md).
 
 **Who can message an agent.** There are no agent accounts, but an agent JID
 only starts to exist when it first logs in, which takes that host's key;

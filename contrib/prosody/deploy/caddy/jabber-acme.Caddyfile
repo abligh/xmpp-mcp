@@ -1,0 +1,18 @@
+# The same as ../apache/jabber-acme.conf, for a host where Caddy owns port 80.
+#
+# Let's Encrypt fetches http://<name>/.well-known/acme-challenge/<token>;
+# certbot answers it inside the Prosody container, published on
+# 127.0.0.1:8480 (ACME_PORT in .env). The "http://" prefix matters: it keeps
+# Caddy from managing these names itself — no certificate of its own, and no
+# redirect to HTTPS, which would send Let's Encrypt away from the challenge.
+#
+# Add to the Caddyfile (or `import` this file), then `caddy reload`.
+
+http://jabber.example.com, http://jabber-agent.example.com {
+	handle /.well-known/acme-challenge/* {
+		reverse_proxy 127.0.0.1:8480
+	}
+	handle {
+		respond 403
+	}
+}

@@ -1,0 +1,34 @@
+#!/usr/bin/env lua
+-- xmpp-mcp-host-key HOST — print HOST's key file.
+--
+-- The same derivation as `xmpp-mcp-keys host-key` (src/xmpp_mcp/credentials.py),
+-- using the same library as mod_auth_xmpp_mcp, so no Python is needed on the
+-- server. The master key is read from its file and never appears on a command
+-- line:
+--
+--   docker compose exec -T prosody xmpp-mcp-host-key host1 > host1.key
+
+package.path = "/usr/lib/prosody/?.lua;" .. package.path
+package.cpath = "/usr/lib/prosody/?.so;" .. package.cpath
+local hashes = require "prosody.util.hashes"
+local hex = require "prosody.util.hex"
+
+local host = arg[1]
+-- As xmpp-mcp writes {host} into a JID: lower-case letters, digits, '.', '-'.
+if not host or not host:match("^[a-z0-9][a-z0-9.-]*$") or host:match("[.-]$") then
+	io.stderr:write("usage: xmpp-mcp-host-key HOST   (HOST as it appears in agent JIDs,",
+		" e.g. host1 for <session>.host1@...)\n")
+	os.exit(2)
+end
+
+local f = assert(io.open("/etc/prosody/secrets/master.key", "r"))
+local master = hex.decode((f:read("a"):gsub("%s", "")))
+f:close()
+if not master or #master ~= 32 then
+	io.stderr:write("xmpp-mcp-host-key: the master key must be 64 hex characters\n")
+	os.exit(1)
+end
+
+io.write("# xmpp-mcp host key v1\n",
+	"host = ", host, "\n",
+	"key = ", hex.encode(hashes.hmac_sha256(master, "xmpp-mcp host v1|" .. host)), "\n")

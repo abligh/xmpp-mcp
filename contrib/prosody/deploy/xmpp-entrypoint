@@ -1,0 +1,42 @@
+#!/bin/bash
+# Start-up for the xmpp-mcp Prosody image. Runs as root, then hands over to
+# the official entrypoint (which drops to the prosody user):
+#
+#   1. on first start, create the master key — every agent host's key is
+#      derived from it, so back it up (it lives in ./secrets on the host);
+#   2. obtain any missing certificate and import them into Prosody — Prosody
+#      only starts once both domains have one;
+#   3. renew in the background, twice a day, reloading Prosody in place.
+#
+# Anything other than "prosody ..." is passed straight to prosodyctl, as in
+# the official image.
+
+set -euo pipefail
+
+if [[ ${1:-} == prosody ]]; then
+	: "${JABBER_DOMAIN:?}" "${AGENT_DOMAIN:?}" "${MUC_DOMAIN:?}"
+
+	secrets=/etc/prosody/secrets
+	master=$secrets/master.key
+	mkdir -p "$secrets"
+	if [[ ! -s $master ]]; then
+		(umask 077 && openssl rand -hex 32 >"$master.new")
+		mv "$master.new" "$master"
+		echo "xmpp-entrypoint: created a new master key. Back up ./secrets/master.key:" \
+			"every agent host's key is derived from it." >&2
+	fi
+	chown -R prosody:prosody "$secrets"
+	chmod 0700 "$secrets"
+	chmod 0600 "$master"
+
+	xmpp-certs obtain
+
+	(
+		while true; do
+			sleep $((43200 + RANDOM % 3600))
+			xmpp-certs renew || echo "xmpp-entrypoint: renewal failed; retrying later" >&2
+		done
+	) &
+fi
+
+exec /entrypoint.sh "$@"

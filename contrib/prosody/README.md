@@ -55,6 +55,10 @@ own host).
 
 ## Installing
 
+For a ready-made server — Prosody in Docker with its own Let's Encrypt
+certificates behind an existing web server — see [`deploy/`](deploy/README.md).
+By hand:
+
 1. Copy `mod_auth_xmpp_mcp.lua` into a directory on Prosody's `plugin_paths`.
    Prosody 13; it uses the `prosody.util.*` module names.
 2. Make the master key where Prosody can read it and nothing else can:

@@ -1,0 +1,42 @@
+# Prosody for people and xmpp-mcp agents, on a host whose web server owns port 80.
+# See README.md. In short:
+#
+#   cp .env.example .env            # then edit
+#   docker compose up -d --build
+#   docker compose logs -f          # first start waits for certificates
+
+name: xmpp-server
+
+services:
+  prosody:
+    build:
+      context: ..                     # contrib/prosody: the auth module + deploy/
+      dockerfile: deploy/Dockerfile
+    image: xmpp-mcp-prosody:13.0
+    restart: unless-stopped
+    environment:
+      JABBER_DOMAIN: ${JABBER_DOMAIN:?set JABBER_DOMAIN in .env}
+      AGENT_DOMAIN: ${AGENT_DOMAIN:?set AGENT_DOMAIN in .env}
+      MUC_DOMAIN: ${MUC_DOMAIN:?set MUC_DOMAIN in .env}
+      ACME_EMAIL: ${ACME_EMAIL:-}
+      ACME_STAGING: ${ACME_STAGING:-0}
+      ACME_SERVER: ${ACME_SERVER:-}
+      PROSODY_ADMINS: ${PROSODY_ADMINS:-}
+      XMPP_MCP_REVOKED_HOSTS: ${XMPP_MCP_REVOKED_HOSTS:-}
+    ports:
+      - "5222:5222"                         # XMPP clients (STARTTLS, required)
+      - "127.0.0.1:${ACME_PORT:-8480}:80"   # ACME HTTP-01 only, via Apache
+    volumes:
+      - ./secrets:/etc/prosody/secrets      # the master key — back it up
+      - letsencrypt:/etc/letsencrypt        # certbot account + certificates
+      - data:/var/lib/prosody               # accounts, archives, rooms
+    healthcheck:
+      test: ["CMD-SHELL", "prosodyctl shell 'server:version()' >/dev/null 2>&1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10m                     # the first start waits for certificates
+
+volumes:
+  letsencrypt:
+  data:
