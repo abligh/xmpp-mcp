@@ -195,7 +195,8 @@ Three layers:
 # Channel / identity / relay suites: drive real `xmpp-mcp --channel`
 # subprocesses over stdio JSON-RPC, exactly as Claude Code does, against a lab
 # — ejabberd by default, or Prosody (per-host derived credentials, verified
-# TLS, humans and agents on separate virtual hosts).
+# TLS, humans and agents on separate virtual hosts; the auth module is the
+# optional add-on in contrib/prosody/).
 .\.venv\Scripts\python.exe -m pytest -m agents
 .\.venv\Scripts\python.exe -m pytest -m agents --xmpp-lab prosody
 

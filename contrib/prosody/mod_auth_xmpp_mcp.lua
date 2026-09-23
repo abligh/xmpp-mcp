@@ -1,7 +1,8 @@
 -- mod_auth_xmpp_mcp: host-scoped derived credentials for xmpp-mcp agents.
 --
--- The server half of xmpp_mcp/credentials.py. Agents on a virtual host that
--- uses this module log in as <session>.<host>@<vhost> with a password they
+-- The server half of xmpp_mcp/credentials.py; see README.md alongside. Agents
+-- on a virtual host that uses this module log in as <session>.<host>@<vhost>
+-- with a password they
 -- derive from their *host's* key; the server holds only a master key and
 -- re-derives:
 --
@@ -10,9 +11,12 @@
 --   password = "xmc1." .. expiry .. "." .. base64url(mac)
 --
 -- `host` is taken from the JID being authenticated (after the first dot), so a
--- host's key only ever works for that host's JIDs. There are no stored
--- accounts: any well-formed agent JID "exists" (so messages to an agent that is
--- offline are kept for it), and nothing can be registered or changed.
+-- host's key only ever works for that host's JIDs. There are no accounts to
+-- create or change. An agent JID "exists" — can receive messages, and have
+-- them kept while it is offline — once it has logged in at least once. So
+-- nobody can have mail stored for a session ID they merely made up: only a
+-- holder of that host's key could bring such a JID into being, by logging in
+-- as it.
 --
 -- Only PLAIN is offered — the password has to reach us to be checked — so the
 -- host must require TLS (c2s_require_encryption, which is Prosody's default).
@@ -38,6 +42,8 @@ local max_ttl = module:get_option_number("xmpp_mcp_max_ttl", 7 * 24 * 3600);
 local skew = module:get_option_number("xmpp_mcp_clock_skew", 300);
 local master_file = module:get_option_string("xmpp_mcp_master_key_file");
 local revoked = module:get_option_set("xmpp_mcp_revoked_hosts", {});
+-- Agent JIDs that have logged in: the only ones that "exist" (see above).
+local seen = module:open_store("xmpp_mcp_seen");
 
 local function load_master()
 	assert(master_file, "mod_auth_xmpp_mcp: set xmpp_mcp_master_key_file");
@@ -93,13 +99,16 @@ function provider.test_password(username, password)
 	local jid = username .. "@" .. host;
 	local mac = hashes.hmac_sha256(host_key, "xmpp-mcp agent v1|" .. jid .. "|" .. expiry);
 	if hashes.equals(base64url(mac), token) then
+		if not seen:get(username) then
+			seen:set(username, { first_login = now });
+		end
 		return true;
 	end
 	return refuse(username, "bad credential");
 end
 
 function provider.user_exists(username)
-	return split(username) ~= nil;
+	return split(username) ~= nil and seen:get(username) ~= nil;
 end
 
 function provider.get_password()

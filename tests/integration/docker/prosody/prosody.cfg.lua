@@ -4,7 +4,7 @@
 --   xmpp.test          humans — ordinary accounts, SCRAM-hashed passwords
 --   agents.xmpp.test   agents — <session>.<host>@agents.xmpp.test, no stored
 --                      accounts: host-scoped derived credentials checked by
---                      mod_auth_xmpp_mcp (see xmpp_mcp/credentials.py)
+--                      mod_auth_xmpp_mcp (contrib/prosody/)
 --   conference.xmpp.test  rooms shared by both
 --
 -- TLS is mandatory for every client (the derived credential travels as SASL

@@ -30,7 +30,7 @@ The session part of the localpart must not contain ``.``: the server splits
 ``<session>.<host>`` at the first dot. Claude Code session IDs (UUIDs) never
 do. The login itself is SASL PLAIN, so it must run over TLS.
 
-The server side is ``tests/integration/docker/prosody/modules/mod_auth_xmpp_mcp.lua``,
+The server side is ``contrib/prosody/mod_auth_xmpp_mcp.lua``,
 which implements the same derivation inside Prosody.
 
 Key files are small text files::

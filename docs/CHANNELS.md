@@ -49,9 +49,9 @@ python -m venv .venv
 # 2. Lab XMPP server — one of:
 #    ejabberd: open in-band registration, one shared agent password, plain text.
 python start-lab-ejabberd.py
-#    Prosody (port 5322): the production shape — per-host derived credentials,
-#    TLS verified, humans and agents on separate virtual hosts. See
-#    "Authentication: one secret per host" below.
+#    Prosody (port 5322): the production shape — per-host derived credentials
+#    (an optional add-on, see "Authentication: one secret per host" below),
+#    TLS verified, humans and agents on separate virtual hosts.
 python start-lab-prosody.py
 
 # 3. The webhook relay (optional, one per host)
@@ -560,6 +560,13 @@ window.
 
 ## Authentication: one secret per host
 
+> **An optional add-on, separate from xmpp-mcp itself.** Everything above
+> works with ordinary accounts on any server (`XMPP_PASSWORD`). This scheme
+> needs a server-side module — so far only for Prosody, in
+> [`contrib/prosody/`](../contrib/prosody/README.md) — plus the
+> `xmpp-mcp-keys` tool and the `*_HOST_KEY_FILE` settings. It is kept apart
+> so the core can be adopted, or upstreamed, without it.
+
 Every agent on a host can read every other agent's files, so a password per
 agent adds nothing *within* a host — the host is the trust boundary. The
 recommended setup therefore gives each **host** one secret, while every
@@ -631,12 +638,18 @@ The host key file must be mode 0600, readable by the user the agents run as
 key: `WEBHOOK_XMPP_JID=webhook.host1@agents.example.com`,
 `WEBHOOK_XMPP_HOST_KEY_FILE=/etc/xmpp-mcp/host1.key`.
 
-**Server side.** Prosody: copy `tests/integration/docker/prosody/modules/mod_auth_xmpp_mcp.lua`
-into a plugin directory and configure the agents host as in the lab's
-`prosody.cfg.lua` (`authentication = "xmpp_mcp"`,
-`xmpp_mcp_master_key_file`, optionally `xmpp_mcp_revoked_hosts`). The check
-runs inside Prosody — no helper process. ejabberd would need the same check
-as an external-auth script (not built yet).
+**Server side.** Install `contrib/prosody/mod_auth_xmpp_mcp.lua` and give the
+agents their own virtual host — see
+[`contrib/prosody/README.md`](../contrib/prosody/README.md). The check runs
+inside Prosody: no SASL daemon, no helper process.
+
+**Who can message an agent.** There are no agent accounts, but an agent JID
+only starts to exist when it first logs in, which takes that host's key;
+messages to a session ID that never logged in bounce, and nothing is stored
+for it. With server-to-server off, as in the lab, the only possible senders
+are authenticated users of the server: humans with accounts, and agents on
+hosts holding a key (who can make up session IDs, but only on their own
+host). The sender gate narrows that further.
 
 **The Prosody lab** (`python start-lab-prosody.py`, port 5322) is this setup
 end to end: a throwaway CA and verified TLS, humans on `xmpp.test`, agents
@@ -703,13 +716,12 @@ Flags win over the environment, which wins over `.env`.
   Encrypt), which the lab — running inside docker — cannot obtain. The
   ejabberd lab still runs plain-text with a shared password and open
   registration: fine for development, not for production.
-* **ejabberd server-side check.** Derived credentials are verified by a
-  Prosody module; ejabberd would need the same logic as an external-auth
-  script.
-* **Stored messages for any agent-shaped JID.** With no account database,
-  every well-formed `<session>.<host>` JID on the agents host "exists", so
-  anyone who can reach the server can leave offline messages for sessions
-  that will never log in. Harmless, but it is storage a stranger can fill.
+* **Derived credentials are Prosody-only.** The server half exists only as a
+  Prosody module (`contrib/prosody/`); elsewhere, use ordinary accounts.
+* **Agent JIDs are never forgotten.** Once a session has logged in, its JID
+  keeps receiving (and storing) offline messages after the session is gone.
+  Prosody's usual archive and offline expiry applies; nothing prunes the
+  record of which JIDs exist.
 * **Permission relay** (`claude/channel/permission`). This isn't declared yet.
   Senders are already server-authenticated, so it could be added for a
   specific allowlist of human operators.

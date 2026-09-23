@@ -10,6 +10,11 @@ turns that session into an addressable agent on a shared XMPP server, with
 inbound messages *pushed* into the session (no polling) — plus a standalone
 **webhook→XMPP relay**. See `docs/CHANNELS.md`.
 
+Optional and **separate from the core** (not for upstreaming with it):
+per-host derived agent credentials — `credentials.py` / `xmpp-mcp-keys`, the
+`*_HOST_KEY_FILE` settings, and the Prosody auth module in `contrib/prosody/`.
+Everything else works with plain accounts on any server.
+
 Targets two XMPP server products in particular: **Openfire** (open-source) and
 **Isode M-Link** (commercial, military-grade). The core messaging surface is
 RFC 6120/6121 so it also works against ejabberd, Prosody, etc.
@@ -32,6 +37,7 @@ src/xmpp_mcp/
                          #   gate, queue/pump, session-binding middleware
   identity.py            # {session}/{agent}/{host}/{fqdn} JID templating
   credentials.py         # host-scoped derived credentials + xmpp-mcp-keys CLI
+                         #   (optional add-on; server half in contrib/prosody/)
   claude_session.py      # find + watch the Claude Code session file
                          #   (session ID -> canonical JID, name -> friendly name)
   agents.py              # <agent/> presence extension + presence cache
@@ -93,7 +99,7 @@ tests/integration/       # docker-based E2E (two labs available — see below)
                          #   xmpp.test, agents on agents.xmpp.test with
                          #   derived credentials, TLS required + verified
       prosody.cfg.lua
-      modules/mod_auth_xmpp_mcp.lua  # server half of credentials.py
+                         #   (mounts contrib/prosody/ as its plugin dir)
       generated/         # CA, certs, keys (gitignored, made on first run)
     ejabberd/            # alternative lab — MAM works, and the lab the
                          #   channel/agent suites need (open XEP-0077
@@ -131,6 +137,10 @@ tests/integration/       # docker-based E2E (two labs available — see below)
   test_prosody_auth_e2e.py       # 12 tests — attacks the Prosody lab's auth
                                  #   directly (forged / expired / cross-host /
                                  #   revoked / plaintext); skipped on ejabberd
+
+contrib/prosody/         # optional: mod_auth_xmpp_mcp.lua (server half of
+                         #   credentials.py) + README — deployment material,
+                         #   not part of the upstreamable core
 
 scripts/                 # one-off demo runners (use the test fixtures + an
   demo_chat_search.py    #   in-process FastMCP Client)
@@ -516,6 +526,13 @@ Channel/agent mode adds `XMPP_CHANNEL`, `XMPP_AGENT_NAME`, `XMPP_AGENT_ID`,
     pinned to an address** (STARTTLS uses `server_hostname=default_domain`,
     as RFC 7590 wants). So a private CA plus `XMPP_CA_FILE` gives real
     verification in the lab; `XMPP_TLS_INSECURE` isn't needed.
+46. **A Prosody auth provider's `user_exists` decides who can receive mail.**
+    `mod_offline` stores, and the server accepts, messages for any user it
+    says exists. An account-less provider that answers "yes" for every
+    well-formed name lets any user of the server fill storage for JIDs that
+    will never log in. `mod_auth_xmpp_mcp` only says yes for JIDs that have
+    logged in (a `xmpp_mcp_seen` store); anything else bounces with
+    `service-unavailable`.
 
 ## Test markers
 
@@ -552,10 +569,13 @@ Channel/agent mode adds `XMPP_CHANNEL`, `XMPP_AGENT_NAME`, `XMPP_AGENT_ID`,
   nothing is delivered (the server warns at startup). Claude Code spawns MCP
   servers over stdio, which is the supported path.
 - **Agent authentication.** The production shape is the Prosody lab:
-  per-host derived credentials (`credentials.py` + `mod_auth_xmpp_mcp.lua`),
-  TLS required and verified, registration closed. The ejabberd lab still uses
-  a shared password, open registration and plain text (development only);
-  the ejabberd equivalent of the Prosody auth module isn't built. The
+  per-host derived credentials (`credentials.py` +
+  `contrib/prosody/mod_auth_xmpp_mcp.lua`), TLS required and verified,
+  registration closed. That scheme is an optional add-on and Prosody-only;
+  with any other server, agents use ordinary accounts. The ejabberd lab still
+  uses a shared password, open registration and plain text (development
+  only). An agent JID exists only once it has logged in, so nobody can leave
+  mail for a made-up session ID without that host's key. The
   permission-relay capability (`claude/channel/permission`) is deliberately
   not declared yet.
 - **Relay delivery is at-most-once.** The queue survives an XMPP outage but

@@ -150,3 +150,28 @@ async def test_an_agent_and_a_human_talk(prosody: LabHandle, spawn_agent) -> Non
         assert (ev["content"], ev["meta"]["sender_jid"]) == ("hello from a human", "alice@xmpp.test")
         await agent.call("reply", {"to": ev["meta"]["reply_to"], "message": "hello, human"})
         assert (await alice.wait_for_message(timeout=5)).body == "hello, human"
+
+
+async def test_no_mail_for_a_session_that_never_logged_in(prosody: LabHandle) -> None:
+    """A made-up agent JID doesn't exist: messages to it bounce, none are stored."""
+    ghost = _agent_jid()
+    async with prosody.raw("alice") as alice:
+        errors: asyncio.Queue = asyncio.Queue()
+        alice._client.add_event_handler("message_error", errors.put_nowait)
+        alice.send_chat(ghost, "anyone there?")
+        bounce = await asyncio.wait_for(errors.get(), timeout=10)
+    assert bounce["from"].bare == ghost
+    assert bounce["error"]["condition"] == "service-unavailable"
+
+
+async def test_mail_waits_for_an_agent_that_has_logged_in(prosody: LabHandle) -> None:
+    """Once a session has logged in, it exists: mail is kept while it is away."""
+    jid = _agent_jid()
+    key = load_host_key(prosody.lab.host_keys["lab"])
+    assert await _login(prosody, jid, key.password_for(jid))  # logs in, then leaves
+    async with prosody.raw("alice") as alice:
+        errors: asyncio.Queue = asyncio.Queue()
+        alice._client.add_event_handler("message_error", errors.put_nowait)
+        alice.send_chat(jid, "for when you're back")
+        with pytest.raises(asyncio.TimeoutError):
+            await asyncio.wait_for(errors.get(), timeout=3)  # accepted, not bounced
