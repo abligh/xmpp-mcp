@@ -34,6 +34,7 @@ dev = [
 [project.scripts]
 xmpp-mcp = "xmpp_mcp.server:main"
 xmpp-webhook-relay = "xmpp_mcp.webhook_relay:main"
+xmpp-mcp-keys = "xmpp_mcp.credentials:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/xmpp_mcp"]

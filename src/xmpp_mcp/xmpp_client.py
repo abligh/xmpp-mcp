@@ -33,6 +33,7 @@ from slixmpp.xmlstream.matcher import StanzaPath
 from .agents import AGENT_NS, AgentInfo, PresenceCache, best_presence, is_available
 from .claude_session import ClaudeSession, SessionWatcher
 from .config import Settings
+from .credentials import CredentialError, HostKey, load_host_key
 from .security_labels import SEC_LABEL_NS
 
 logger = logging.getLogger("xmpp_mcp.xmpp")
@@ -131,7 +132,17 @@ class XMPPClient:
 
     def __init__(self, settings: Settings) -> None:
         self._settings = settings
-        self.xmpp = ClientXMPP(settings.xmpp_jid, settings.xmpp_password)
+        # With a host key the password is derived per connect (see
+        # credentials.py); load and check the key now so a mismatch between
+        # the key's host and the JID fails at startup, not at login.
+        self._host_key: HostKey | None = None
+        if settings.xmpp_host_key_file:
+            try:
+                self._host_key = load_host_key(settings.xmpp_host_key_file)
+                self._host_key.password_for(JID(settings.xmpp_jid).bare)
+            except CredentialError as exc:
+                raise XMPPError(str(exc)) from exc
+        self.xmpp = ClientXMPP(settings.xmpp_jid, settings.xmpp_password or "")
         # Constructed inside the FastMCP lifespan, so a loop is always running.
         self._ready: asyncio.Future[bool] = asyncio.get_running_loop().create_future()
         self._inbox: deque[dict[str, Any]] = deque(maxlen=settings.xmpp_inbox_size)
@@ -227,6 +238,12 @@ class XMPPClient:
             # ever try STARTTLS. Pin to STARTTLS only.
             self.xmpp.enable_direct_tls = False
 
+        if settings.xmpp_ca_file:
+            # A private CA. Verification stays on: the certificate is still
+            # checked against the JID's domain (RFC 7590), even when
+            # XMPP_HOST pins the connection to an address.
+            self.xmpp.ssl_context.load_verify_locations(cafile=settings.xmpp_ca_file)
+
         if settings.xmpp_tls_insecure:
             logger.warning("XMPP_TLS_INSECURE is set — TLS certificate checks disabled")
             self.xmpp.ssl_context.check_hostname = False
@@ -283,6 +300,11 @@ class XMPPClient:
 
     def _connect(self) -> None:
         s = self._settings
+        if self._host_key is not None:
+            # A fresh credential for every (re)connect, so none outlives its TTL.
+            self.xmpp.password = self._host_key.password_for(
+                self.xmpp.boundjid.bare, ttl=s.xmpp_credential_ttl
+            )
         if s.xmpp_host:
             self.xmpp.connect(host=s.xmpp_host, port=s.xmpp_port)
         else:

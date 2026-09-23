@@ -28,6 +28,7 @@ from slixmpp import ClientXMPP
 from slixmpp.exceptions import IqError, IqTimeout, PresenceError
 
 from ..agents import PresenceCache
+from ..credentials import load_host_key
 from . import providers
 from .auth import authorised
 from .routes import load_routes
@@ -81,7 +82,13 @@ class WebhookRelay:
         self._seen_ids: deque[str] = deque(maxlen=settings.dedupe_size or 1)
         self.duplicates = 0
 
-        self.xmpp = ClientXMPP(settings.xmpp_jid, settings.xmpp_password)
+        if not settings.xmpp_password and not settings.xmpp_host_key_file:
+            raise ValueError("set WEBHOOK_XMPP_PASSWORD or WEBHOOK_XMPP_HOST_KEY_FILE")
+        self._host_key = (load_host_key(settings.xmpp_host_key_file)
+                          if settings.xmpp_host_key_file else None)
+        self.xmpp = ClientXMPP(settings.xmpp_jid, settings.xmpp_password or "")
+        if settings.xmpp_ca_file:
+            self.xmpp.ssl_context.load_verify_locations(cafile=settings.xmpp_ca_file)
         for xep in ("xep_0030", "xep_0045", "xep_0199", "xep_0335"):
             self.xmpp.register_plugin(xep)
         if settings.xmpp_host:
@@ -108,6 +115,8 @@ class WebhookRelay:
 
     def _connect(self) -> None:
         s = self.settings
+        if self._host_key is not None:
+            self.xmpp.password = self._host_key.password_for(self.xmpp.boundjid.bare)
         if s.xmpp_host:
             self.xmpp.connect(host=s.xmpp_host, port=s.xmpp_port)
         else:

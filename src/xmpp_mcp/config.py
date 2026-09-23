@@ -47,7 +47,25 @@ class Settings(BaseSettings):
             "expanded (and normalised) at load time"
         ),
     )
-    xmpp_password: str = Field(..., description="Password for the service account")
+    xmpp_password: str | None = Field(
+        None,
+        description="Password for the account. Not needed with XMPP_HOST_KEY_FILE",
+    )
+    xmpp_host_key_file: str | None = Field(
+        None,
+        description=(
+            "Host key file (xmpp-mcp-keys host-key). When set, a password is "
+            "derived for this agent's JID on every connect instead of XMPP_PASSWORD "
+            "— one secret per host, one identity per session"
+        ),
+    )
+    xmpp_credential_ttl: int = Field(
+        24 * 3600, ge=60, description="Lifetime of each derived password (seconds)"
+    )
+    xmpp_ca_file: str | None = Field(
+        None,
+        description="CA bundle to verify the server's certificate with (a private CA)",
+    )
     xmpp_host: str | None = Field(
         None,
         description="Server host to connect to, if it differs from the JID domain",
@@ -193,6 +211,8 @@ class Settings(BaseSettings):
         if not parsed.user:
             raise ValueError(f"XMPP_JID {jid!r} has no localpart (expected user@domain)")
         self.xmpp_jid = jid
+        if not self.xmpp_password and not self.xmpp_host_key_file:
+            raise ValueError("set XMPP_PASSWORD, or XMPP_HOST_KEY_FILE for derived credentials")
         # An agent's natural room nick is its friendly name. Only applied when
         # the nick was left at its default — an explicit XMPP_NICK always wins.
         self._nick_explicit = "xmpp_nick" in self.model_fields_set

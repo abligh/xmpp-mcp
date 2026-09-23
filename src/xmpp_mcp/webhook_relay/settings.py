@@ -24,7 +24,17 @@ class RelaySettings(BaseSettings):
 
     # --- XMPP -------------------------------------------------------------
     xmpp_jid: str = Field(..., description="JID the relay logs in as, e.g. webhook@example.com")
-    xmpp_password: str = Field(..., description="Password for the relay account")
+    xmpp_password: str | None = Field(
+        None, description="Password for the relay account (or use xmpp_host_key_file)"
+    )
+    xmpp_host_key_file: str | None = Field(
+        None,
+        description=(
+            "Host key file: derive the relay's password, like the agents on this "
+            "host do (its JID is then e.g. webhook.<host>@<agents domain>)"
+        ),
+    )
+    xmpp_ca_file: str | None = Field(None, description="CA bundle for a private CA")
     xmpp_host: str | None = Field(None, description="Server host, if not the JID domain")
     xmpp_port: int = Field(5222, description="C2S port")
     xmpp_tls_insecure: bool = Field(
