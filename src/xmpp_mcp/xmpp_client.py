@@ -25,7 +25,10 @@ from typing import Any
 from slixmpp import JID, ClientXMPP, Presence
 from slixmpp.exceptions import IqError, IqTimeout, PresenceError
 from slixmpp.jid import InvalidJID
+from slixmpp.xmlstream.xmlstream import NotConnectedError
 from slixmpp.xmlstream import register_stanza_plugin
+from slixmpp.xmlstream.handler import Callback
+from slixmpp.xmlstream.matcher import StanzaPath
 
 from .agents import AGENT_NS, AgentInfo, PresenceCache, best_presence, is_available
 from .claude_session import ClaudeSession, SessionWatcher
@@ -90,6 +93,15 @@ def _session_presence(session: ClaudeSession | None) -> tuple[str | None, str | 
     if status == "idle":
         return None, "idle"
     return None, None
+
+
+def _describe(exc: BaseException) -> str:
+    """An exception as text that is never blank (timeouts stringify to "")."""
+    condition = getattr(exc, "condition", None)
+    text = str(exc).strip()
+    if condition:
+        return f"{condition}{': ' + exc.text if getattr(exc, 'text', None) else ''}"
+    return text or type(exc).__name__
 
 
 def _open_access_form(xmpp: Any) -> Any:
@@ -158,6 +170,7 @@ class XMPPClient:
             else session.name_source if session and session.name else None
         )
         self._session_watcher: SessionWatcher | None = None
+        self._nick_task: asyncio.Task[None] | None = None
         # Presence follows the Claude Code session's busy/idle status until an
         # explicit set_presence says otherwise.
         self._presence_explicit = False
@@ -170,6 +183,8 @@ class XMPPClient:
         # Rooms whose nick tracks the friendly name (joined without an
         # explicit nick); renamed along with the agent.
         self._nick_follows: set[str] = set()
+        # Rooms with a join in flight (see _route_join_error).
+        self._joining: set[str] = set()
         self._reconnect_wait = _RECONNECT_MIN
         self._reconnect_task: asyncio.Task[None] | None = None
 
@@ -243,6 +258,9 @@ class XMPPClient:
         self.xmpp.add_event_handler("presence", self.presence.update)
         self.xmpp.add_event_handler("groupchat_presence", self.presence.update)
         self.xmpp.add_event_handler("groupchat_presence", self._on_muc_self_presence)
+        self.xmpp.register_handler(Callback(
+            "xmpp-mcp join errors", StanzaPath("presence@type=error"), self._route_join_error,
+        ))
         self.xmpp.add_event_handler("roster_update", self._on_roster_update)
         # ``message`` fires for *every* incoming message stanza — including
         # groupchat. ``groupchat_message`` is an additional, narrower event
@@ -305,6 +323,8 @@ class XMPPClient:
     async def stop(self) -> None:
         """Leave joined rooms and disconnect cleanly."""
         self._stopping = True
+        if self._nick_task is not None:
+            self._nick_task.cancel()
         if self._session_watcher is not None:
             await self._session_watcher.stop()
         if self._reconnect_task is not None:
@@ -344,7 +364,9 @@ class XMPPClient:
             if not self._ready.done():
                 self._ready.set_exception(XMPPError(f"Roster fetch failed on login: {exc}"))
             return
-        asyncio.ensure_future(self._publish_nick())
+        # Tracked, so stop() can cancel it: a publish still in flight when the
+        # stream closes would otherwise raise NotConnectedError in a stray task.
+        self._nick_task = asyncio.ensure_future(self._publish_nick())
         if not self._ready.done():
             self._ready.set_result(True)
             return
@@ -363,6 +385,19 @@ class XMPPClient:
         if any(self._presence):
             show, status = self._presence
             self._announce(show, status)
+
+    def _route_join_error(self, pres: Any) -> None:
+        """Hand a room's join error to slixmpp's waiter, whatever its shape.
+
+        slixmpp's join_muc_wait only hears error presences that carry the
+        MUC ``<x xmlns='…/muc'/>`` element, as the XEP-0045 examples do.
+        Prosody's replies (e.g. a nick conflict) don't, so the join just times
+        out — and the nick fallback never gets its chance. Re-raise any other
+        error from a room being joined as the event the waiter listens for.
+        """
+        room = pres["from"].bare
+        if room in self._joining and pres.xml.find("{http://jabber.org/protocol/muc}x") is None:
+            self.xmpp.event(f"muc::{room}::presence-error", pres)
 
     def _on_muc_self_presence(self, pres: Any) -> None:
         """Keep ``_joined_rooms`` in step with the nick the room gives us.
@@ -462,12 +497,12 @@ class XMPPClient:
         """
         nick = self.xmpp.plugin["xep_0172"]
         try:
-            await nick.publish_nick(self.friendly_name, options=_open_access_form(self.xmpp))
-        except (IqError, IqTimeout):
             try:
+                await nick.publish_nick(self.friendly_name, options=_open_access_form(self.xmpp))
+            except (IqError, IqTimeout):
                 await nick.publish_nick(self.friendly_name)
-            except (IqError, IqTimeout) as exc:
-                logger.debug("Could not publish XEP-0172 nickname: %s", exc)
+        except (IqError, IqTimeout, NotConnectedError) as exc:
+            logger.debug("Could not publish XEP-0172 nickname: %s", exc)
 
     def _on_claude_session_change(self, old: ClaudeSession, new: ClaudeSession) -> Any:
         if new.status != old.status and not self._presence_explicit:
@@ -842,6 +877,7 @@ class XMPPClient:
                            f"{nick} ({(s.xmpp_agent_id or JID(s.xmpp_jid).user)[:8]})"]
         muc = self.xmpp.plugin["xep_0045"]
         for attempt, candidate in enumerate(candidates, 1):
+            self._joining.add(room)
             try:
                 await muc.join_muc_wait(
                     room, candidate, maxstanzas=0, timeout=s.xmpp_connect_timeout,
@@ -854,9 +890,11 @@ class XMPPClient:
                     continue
                 # Nick conflict with no fallback left, members-only, banned,
                 # password required… (XEP-0045 §7.2.x).
-                raise XMPPError(f"Failed to join room {room}: {exc}") from exc
+                raise XMPPError(f"Failed to join room {room}: {_describe(exc)}") from exc
             except (IqError, IqTimeout, asyncio.TimeoutError) as exc:
-                raise XMPPError(f"Failed to join room {room}: {exc}") from exc
+                raise XMPPError(f"Failed to join room {room}: {_describe(exc)}") from exc
+            finally:
+                self._joining.discard(room)
         if follows:
             self._nick_follows.add(room)
         else:
@@ -917,17 +955,36 @@ class XMPPClient:
         return list(self._joined_rooms)
 
     async def muc_services(self) -> list[str]:
-        """MUC services on our server: disco#items items whose identity is
-        ``conference/text`` (XEP-0045 §6.1)."""
+        """Room services we can find: XMPP_MUC_SERVICE, then disco (XEP-0045 §6.1).
+
+        Disco walks our own domain and then its parents: agents often live on
+        a subdomain (agents.example.com) while the room service hangs off the
+        main one (conference.example.com), where disco on the agents' domain
+        can't see it. Services of rooms we are in are included too.
+        """
         services: list[str] = []
-        for item in await self.disco_items():
+        if self._settings.xmpp_muc_service:
+            services.append(self._settings.xmpp_muc_service)
+        labels = self.xmpp.boundjid.domain.split(".")
+        domains = [".".join(labels[i:]) for i in range(max(1, len(labels) - 1))]
+        for domain in domains:
             try:
-                info = await self.disco_info(item["jid"])
+                items = await self.disco_items(domain)
             except XMPPError:
                 continue
-            if any(i["category"] == "conference" and i["type"] == "text"
-                   for i in info["identities"]):
-                services.append(item["jid"])
+            for item in items:
+                if item["jid"] in services:
+                    continue
+                try:
+                    info = await self.disco_info(item["jid"])
+                except XMPPError:
+                    continue
+                if any(i["category"] == "conference" and i["type"] == "text"
+                       for i in info["identities"]):
+                    services.append(item["jid"])
+        for room in self._joined_rooms:
+            if JID(room).domain not in services:
+                services.append(JID(room).domain)
         return services
 
     async def list_rooms(self, service: str | None = None, limit: int = 50) -> dict[str, Any]:
@@ -1015,7 +1072,19 @@ class XMPPClient:
                 "join_room to see them"
             ) from exc
         occupants = [{"nick": JID(i["jid"]).resource or i["name"]} for i in items]
-        return {"room": room, "joined": False, "occupants": occupants}
+        result: dict[str, Any] = {"room": room, "joined": False, "occupants": occupants}
+        # §6.5 lets a service keep the list from outsiders (Prosody does):
+        # an empty list is then not an empty room. The room's own occupant
+        # count (§6.4) tells the two apart.
+        try:
+            count = (await self._room_info(room)).get("occupants")
+        except XMPPError:
+            count = None
+        if count is not None:
+            result["occupant_count"] = count
+            if count > len(occupants):
+                result["hidden"] = True
+        return result
 
     # --- agent directory ------------------------------------------------------
 

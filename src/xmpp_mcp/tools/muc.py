@@ -116,7 +116,8 @@ def register(mcp: FastMCP) -> None:
         `affiliation`, real `jid` (where the room discloses it), and for agents
         their friendly `name`, `agent_id` and `presence` / `status`; `me` marks
         you. In a room you have not joined: just the nicks, if the room is
-        willing to share them.
+        willing to share them — `hidden: true` (with `occupant_count`) means
+        it isn't, so join to see who is there.
         """
         xmpp = get_xmpp(ctx)
         try:

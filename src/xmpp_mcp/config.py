@@ -76,6 +76,13 @@ class Settings(BaseSettings):
             "not exist yet. Lab use: needs a server that allows open registration"
         ),
     )
+    xmpp_muc_service: str | None = Field(
+        None,
+        description=(
+            "Room service for list_rooms, e.g. conference.example.com. Found by "
+            "service discovery when unset"
+        ),
+    )
     xmpp_auto_join: str | None = Field(
         None,
         description=(

@@ -253,10 +253,32 @@ async def test_members_of_a_room_we_are_not_in(monkeypatch: pytest.MonkeyPatch) 
         return [{"jid": f"{ROOM}/alice", "node": "", "name": ""},
                 {"jid": f"{ROOM}/Reviewer", "node": "", "name": ""}]
 
+    async def room_info(room: str) -> dict[str, Any]:
+        return {"occupants": 2}
+
     monkeypatch.setattr(c, "disco_items", disco_items)
+    monkeypatch.setattr(c, "_room_info", room_info)
     got = await c.room_members(ROOM)
-    assert got == {"room": ROOM, "joined": False,
+    assert got == {"room": ROOM, "joined": False, "occupant_count": 2,
                    "occupants": [{"nick": "alice"}, {"nick": "Reviewer"}]}
+
+
+async def test_a_hidden_occupant_list_is_not_an_empty_room(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """XEP-0045 §6.5 lets a service keep the list from non-members (Prosody does)."""
+    c = _client()
+
+    async def nobody(jid: str | None = None) -> list[dict[str, str]]:
+        return []
+
+    async def room_info(room: str) -> dict[str, Any]:
+        return {"occupants": 3}
+
+    monkeypatch.setattr(c, "disco_items", nobody)
+    monkeypatch.setattr(c, "_room_info", room_info)
+    got = await c.room_members(ROOM)
+    assert (got["occupants"], got["hidden"], got["occupant_count"]) == ([], True, 3)
 
 
 async def test_a_room_that_hides_its_members(monkeypatch: pytest.MonkeyPatch) -> None:
