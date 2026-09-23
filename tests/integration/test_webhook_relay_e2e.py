@@ -19,11 +19,11 @@ import pytest
 import pytest_asyncio
 from aiohttp.test_utils import TestServer
 
-from xmpp_mcp.webhook_relay import RelaySettings, WebhookRelay
+from xmpp_mcp.webhook_relay import WebhookRelay
 
-from .conftest import EjabberdHandle
+from .conftest import LabHandle
 
-pytestmark = [pytest.mark.docker, pytest.mark.ejabberd]
+pytestmark = [pytest.mark.docker, pytest.mark.agents]
 
 SECRET = "s3cret"
 GITLAB_TOKEN = "gl-t0ken"
@@ -37,14 +37,8 @@ PR_EVENT = {
 
 
 @pytest_asyncio.fixture
-async def relay(ejabberd: EjabberdHandle) -> AsyncIterator[tuple[WebhookRelay, TestServer]]:
-    acct = ejabberd.accounts["webhook"]
-    settings = RelaySettings(  # type: ignore[call-arg]
-        _env_file=None,
-        xmpp_jid=acct.jid, xmpp_password=acct.password,
-        xmpp_host=ejabberd.host, xmpp_port=ejabberd.c2s_port, xmpp_tls_insecure=True,
-        github_secret=SECRET, gitlab_token=GITLAB_TOKEN,
-    )
+async def relay(lab: LabHandle) -> AsyncIterator[tuple[WebhookRelay, TestServer]]:
+    settings = lab.relay_settings(github_secret=SECRET, gitlab_token=GITLAB_TOKEN)
     r = WebhookRelay(settings)
     await r.start()
     await asyncio.wait_for(r.online.wait(), timeout=15)
@@ -74,7 +68,7 @@ async def _post_github(server: TestServer, path: str, payload: dict) -> dict:
         return await resp.json()
 
 
-async def test_webhook_to_agent(relay, spawn_agent) -> None:
+async def test_webhook_to_agent(relay, spawn_agent, lab: LabHandle) -> None:
     _relay, server = relay
     agent = await spawn_agent("hook")
     ack = await _post_github(server, f"/agent/{agent.jid}", PR_EVENT)
@@ -86,12 +80,12 @@ async def test_webhook_to_agent(relay, spawn_agent) -> None:
         "https://github.com/o/r/pull/42 (by octocat)"
     )
     assert json.loads(rest) == PR_EVENT
-    assert ev["meta"]["sender_jid"] == "webhook@xmpp.test"  # passes the default gate
+    assert ev["meta"]["sender_jid"] == lab.relay_jid  # passes the gate
 
 
-async def test_webhook_to_room_reaches_every_agent(relay, spawn_agent, ejabberd: EjabberdHandle) -> None:
+async def test_webhook_to_room_reaches_every_agent(relay, spawn_agent, lab: LabHandle) -> None:
     _relay, server = relay
-    room = ejabberd.room_jid(f"hooks-{uuid.uuid4().hex[:8]}")
+    room = lab.room_jid(f"hooks-{uuid.uuid4().hex[:8]}")
     a = await spawn_agent("ra", "--join", room)
     b = await spawn_agent("rb", "--join", room)
     await _post_github(server, f"/room/{room}", PR_EVENT)

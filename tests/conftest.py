@@ -16,3 +16,12 @@ def _no_ambient_claude_session(monkeypatch: pytest.MonkeyPatch) -> None:
     """
     monkeypatch.setenv("XMPP_CLAUDE_SESSION", "off")
     monkeypatch.delenv("CLAUDE_CODE_SESSION_ID", raising=False)
+
+
+def pytest_addoption(parser: pytest.Parser) -> None:
+    # Here, not in tests/integration/conftest.py: options must be registered
+    # by a conftest pytest loads before it parses the command line.
+    parser.addoption(
+        "--xmpp-lab", choices=("ejabberd", "prosody"), default="ejabberd",
+        help="which lab the `agents` suites run against (default: ejabberd)",
+    )

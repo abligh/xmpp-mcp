@@ -11,3 +11,6 @@ __pycache__/
 .mcp.json
 # Per-developer Claude Code settings (permissions etc.)
 .claude/settings.local.json
+
+# Prosody lab: generated CA, certificates and keys (start-lab-prosody.py)
+tests/integration/docker/prosody/generated/

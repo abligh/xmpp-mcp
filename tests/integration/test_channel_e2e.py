@@ -5,8 +5,8 @@ Each test spawns one or more ``python -m xmpp_mcp --channel`` subprocesses
 the way Claude Code does. Inbound XMPP traffic must show up as
 ``notifications/claude/channel`` on stdout without any tool call.
 
-Run with ``pytest -m ejabberd`` (not together with the Openfire suite — the
-labs share ports; see conftest.py).
+Run with ``pytest -m agents`` (ejabberd lab) or ``pytest -m agents
+--xmpp-lab prosody`` (Prosody lab: derived credentials, verified TLS).
 """
 
 from __future__ import annotations
@@ -16,13 +16,13 @@ import uuid
 
 import pytest
 
-from .conftest import EjabberdHandle
+from .conftest import LabHandle
 from .helpers.stdio_mcp import ToolCallError
 
-pytestmark = [pytest.mark.docker, pytest.mark.ejabberd]
+pytestmark = [pytest.mark.docker, pytest.mark.agents]
 
 
-def _room(ej: EjabberdHandle, prefix: str = "chan") -> str:
+def _room(ej: LabHandle, prefix: str = "chan") -> str:
     # Fresh room per test: created on first join with the lab defaults
     # (non-anonymous, so occupants see real JIDs).
     return ej.room_jid(f"{prefix}-{uuid.uuid4().hex[:8]}")
@@ -39,11 +39,11 @@ async def test_initialize_declares_channel_capability(spawn_agent) -> None:
     assert agent.jid in result["instructions"]
 
 
-async def test_plain_mode_is_unchanged(spawn_agent, ejabberd: EjabberdHandle) -> None:
+async def test_plain_mode_is_unchanged(spawn_agent, lab: LabHandle) -> None:
     """Without --channel: no capability, no pushes — the pull tools still work."""
     agent = await spawn_agent("plain", channel=False)
     assert "claude/channel" not in agent.initialize_result["capabilities"].get("experimental", {})
-    async with ejabberd.raw("alice") as alice:
+    async with lab.raw("alice") as alice:
         alice.send_chat(agent.jid, "poll me")
         await agent.assert_no_event(within=2.0)
         got = await agent.call("get_recent_messages")
@@ -53,9 +53,9 @@ async def test_plain_mode_is_unchanged(spawn_agent, ejabberd: EjabberdHandle) ->
 # --- one-to-one ----------------------------------------------------------------
 
 
-async def test_direct_message_is_pushed(spawn_agent, ejabberd: EjabberdHandle) -> None:
+async def test_direct_message_is_pushed(spawn_agent, lab: LabHandle) -> None:
     agent = await spawn_agent("dm")
-    async with ejabberd.raw("alice") as alice:
+    async with lab.raw("alice") as alice:
         alice.send_chat(agent.jid, "please review PR 7")
         ev = await agent.next_event()
     assert ev["content"] == "please review PR 7"
@@ -66,9 +66,9 @@ async def test_direct_message_is_pushed(spawn_agent, ejabberd: EjabberdHandle) -
     assert meta["reply_to"] == meta["sender"]
 
 
-async def test_buffer_still_serves_get_recent_messages(spawn_agent, ejabberd: EjabberdHandle) -> None:
+async def test_buffer_still_serves_get_recent_messages(spawn_agent, lab: LabHandle) -> None:
     agent = await spawn_agent("buf")
-    async with ejabberd.raw("alice") as alice:
+    async with lab.raw("alice") as alice:
         alice.send_chat(agent.jid, "pushed and buffered")
         await agent.next_event()
     # search_messages is non-destructive; get_recent_messages then drains.
@@ -77,9 +77,9 @@ async def test_buffer_still_serves_get_recent_messages(spawn_agent, ejabberd: Ej
     assert [m["body"] for m in got["messages"]] == ["pushed and buffered"]
 
 
-async def test_reply_reaches_the_sender(spawn_agent, ejabberd: EjabberdHandle) -> None:
+async def test_reply_reaches_the_sender(spawn_agent, lab: LabHandle) -> None:
     agent = await spawn_agent("rep")
-    async with ejabberd.raw("alice") as alice:
+    async with lab.raw("alice") as alice:
         alice.send_chat(agent.jid, "status?")
         ev = await agent.next_event()
         sent = await agent.call("reply", {"to": ev["meta"]["reply_to"], "message": "all green"})
@@ -90,13 +90,13 @@ async def test_reply_reaches_the_sender(spawn_agent, ejabberd: EjabberdHandle) -
 
 
 async def test_offline_messages_are_pushed_after_startup(
-    spawn_agent, ejabberd: EjabberdHandle
+    spawn_agent, lab: LabHandle
 ) -> None:
     """Messages sent while the agent was down arrive as soon as it comes back."""
     first = await spawn_agent("off")
     name = first.agent_name
     await first.close()  # the account now exists; the agent is offline
-    async with ejabberd.raw("alice") as alice:
+    async with lab.raw("alice") as alice:
         alice.send_chat(first.jid, "while you were out")
         await asyncio.sleep(0.5)
     again = await spawn_agent("off", name=name)
@@ -104,9 +104,9 @@ async def test_offline_messages_are_pushed_after_startup(
     assert ev["content"] == "while you were out"
 
 
-async def test_sender_gate(spawn_agent, ejabberd: EjabberdHandle) -> None:
+async def test_sender_gate(spawn_agent, lab: LabHandle) -> None:
     agent = await spawn_agent("gate", "--allow", "bob@xmpp.test")
-    async with ejabberd.raw("alice") as alice, ejabberd.raw("bob") as bob:
+    async with lab.raw("alice") as alice, lab.raw("bob") as bob:
         alice.send_chat(agent.jid, "from alice")
         await agent.assert_no_event(within=2.0)
         bob.send_chat(agent.jid, "from bob")
@@ -121,11 +121,11 @@ async def test_sender_gate(spawn_agent, ejabberd: EjabberdHandle) -> None:
 
 
 async def test_room_message_pushed_and_own_echo_suppressed(
-    spawn_agent, ejabberd: EjabberdHandle
+    spawn_agent, lab: LabHandle
 ) -> None:
-    room = _room(ejabberd)
+    room = _room(lab)
     agent = await spawn_agent("muc", "--join", room)
-    async with ejabberd.raw("alice") as alice:
+    async with lab.raw("alice") as alice:
         await alice.join_muc(room, "alice")
         # The agent's own line is reflected by the room (XEP-0045 §7.4)...
         await agent.call("send_room_message", {"room_jid": room, "body": "agent here"})
@@ -141,10 +141,10 @@ async def test_room_message_pushed_and_own_echo_suppressed(
     assert meta["sender_jid"] == "alice@xmpp.test"  # non-anonymous room
 
 
-async def test_reply_to_room_posts_groupchat(spawn_agent, ejabberd: EjabberdHandle) -> None:
-    room = _room(ejabberd)
+async def test_reply_to_room_posts_groupchat(spawn_agent, lab: LabHandle) -> None:
+    room = _room(lab)
     agent = await spawn_agent("mrep", "--join", room)
-    async with ejabberd.raw("alice") as alice:
+    async with lab.raw("alice") as alice:
         await alice.join_muc(room, "alice")
         alice.send_groupchat(room, "who is on call?")
         ev = await agent.next_event()
@@ -155,10 +155,10 @@ async def test_reply_to_room_posts_groupchat(spawn_agent, ejabberd: EjabberdHand
     assert msg.from_jid == f"{room}/{agent.agent_name}"  # nick defaults to agent name
 
 
-async def test_join_and_leave_room_tools(spawn_agent, ejabberd: EjabberdHandle) -> None:
-    room = _room(ejabberd)
+async def test_join_and_leave_room_tools(spawn_agent, lab: LabHandle) -> None:
+    room = _room(lab)
     agent = await spawn_agent("jl")
-    async with ejabberd.raw("alice") as alice:
+    async with lab.raw("alice") as alice:
         await alice.join_muc(room, "alice")
         joined = await agent.call("join_room", {"room_jid": room})
         assert joined["nick"] == agent.agent_name
@@ -189,8 +189,8 @@ async def test_agents_converse_directly(spawn_agent) -> None:
     assert back["meta"]["sender_jid"] == b.jid
 
 
-async def test_list_agents_via_directory_room(spawn_agent, ejabberd: EjabberdHandle) -> None:
-    directory = _room(ejabberd, "agents")
+async def test_list_agents_via_directory_room(spawn_agent, lab: LabHandle) -> None:
+    directory = _room(lab, "agents")
     a = await spawn_agent("dira", "--join", directory)
     b = await spawn_agent(
         "dirb", "--join", directory, env={"XMPP_DISPLAY_NAME": "Beta the Builder"}
@@ -221,8 +221,8 @@ async def test_list_agents_via_directory_room(spawn_agent, ejabberd: EjabberdHan
     assert b.jid not in remaining
 
 
-async def test_get_identity(spawn_agent, ejabberd: EjabberdHandle) -> None:
-    room = _room(ejabberd)
+async def test_get_identity(spawn_agent, lab: LabHandle) -> None:
+    room = _room(lab)
     agent = await spawn_agent("who", "--join", room)
     me = await agent.call("get_identity")
     assert me["jid"] == agent.jid

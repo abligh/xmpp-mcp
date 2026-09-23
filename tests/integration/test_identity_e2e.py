@@ -19,14 +19,14 @@ import pytest
 import pytest_asyncio
 from aiohttp.test_utils import TestServer
 
-from xmpp_mcp.webhook_relay import RelaySettings, WebhookRelay
+from xmpp_mcp.webhook_relay import WebhookRelay
 
-from .conftest import EjabberdHandle
+from .conftest import LabHandle
 
-pytestmark = [pytest.mark.docker, pytest.mark.ejabberd]
+pytestmark = [pytest.mark.docker, pytest.mark.agents]
 
 
-def _directory(ej: EjabberdHandle) -> str:
+def _directory(ej: LabHandle) -> str:
     return ej.room_jid(f"dir-{uuid.uuid4().hex[:8]}")
 
 
@@ -47,8 +47,8 @@ async def _until(predicate, timeout: float = 10.0, every: float = 0.25):
         await asyncio.sleep(every)
 
 
-async def test_canonical_jid_and_friendly_name(spawn_agent, ejabberd: EjabberdHandle) -> None:
-    room = _directory(ejabberd)
+async def test_canonical_jid_and_friendly_name(spawn_agent, lab: LabHandle) -> None:
+    room = _directory(lab)
     rev = await spawn_agent("rev", "--join", room, claude_name="Reviewer")
     me = await rev.call("get_identity")
     assert me["jid"] == rev.jid  # <session id>.lab@xmpp.test — canonical
@@ -57,9 +57,9 @@ async def test_canonical_jid_and_friendly_name(spawn_agent, ejabberd: EjabberdHa
 
 
 async def test_peers_see_the_name_and_can_address_by_it(
-    spawn_agent, ejabberd: EjabberdHandle
+    spawn_agent, lab: LabHandle
 ) -> None:
-    room = _directory(ejabberd)
+    room = _directory(lab)
     rev = await spawn_agent("rev", "--join", room, claude_name="Reviewer")
     bld = await spawn_agent("bld", "--join", room, claude_name="Builder")
 
@@ -81,9 +81,9 @@ async def test_peers_see_the_name_and_can_address_by_it(
     assert (await bld.next_event())["content"] == "on it"
 
 
-async def test_a_rename_propagates(spawn_agent, ejabberd: EjabberdHandle) -> None:
+async def test_a_rename_propagates(spawn_agent, lab: LabHandle) -> None:
     """derived -> auto/user rename: presence, directory and room nick follow."""
-    room = _directory(ejabberd)
+    room = _directory(lab)
     rev = await spawn_agent("rev", "--join", room, claude_name="bridge-cse-0123-18")
     bld = await spawn_agent("bld", "--join", room, claude_name="Builder")
     _rename(rev.session_file, "Reviewer", "user")
@@ -104,9 +104,9 @@ async def test_a_rename_propagates(spawn_agent, ejabberd: EjabberdHandle) -> Non
     assert (await rev.next_event())["content"] == "hello again"
 
 
-async def test_same_friendly_name_twice(spawn_agent, ejabberd: EjabberdHandle) -> None:
+async def test_same_friendly_name_twice(spawn_agent, lab: LabHandle) -> None:
     """Two sessions called Reviewer: both get in, and the name becomes ambiguous."""
-    room = _directory(ejabberd)
+    room = _directory(lab)
     one = await spawn_agent("one", "--join", room, claude_name="Reviewer")
     two = await spawn_agent("two", "--join", room, claude_name="Reviewer")
     nicks = {(await a.call("get_identity"))["rooms"][0]["nick"] for a in (one, two)}
@@ -129,8 +129,8 @@ async def test_same_friendly_name_twice(spawn_agent, ejabberd: EjabberdHandle) -
 
 
 @pytest_asyncio.fixture
-async def named_relay(ejabberd: EjabberdHandle, tmp_path: Path):
-    directory = _directory(ejabberd)
+async def named_relay(lab: LabHandle, tmp_path: Path):
+    directory = _directory(lab)
     routes = tmp_path / "routes.toml"
     routes.write_text('''
 [[route]]
@@ -140,10 +140,7 @@ event = "pull_request"
 match = { "repository.full_name" = "abligh/*", action = "opened" }
 to = "Reviewer"
 ''')
-    acct = ejabberd.accounts["webhook"]
-    relay = WebhookRelay(RelaySettings(  # type: ignore[call-arg]
-        _env_file=None, xmpp_jid=acct.jid, xmpp_password=acct.password,
-        xmpp_host=ejabberd.host, xmpp_port=ejabberd.c2s_port, xmpp_tls_insecure=True,
+    relay = WebhookRelay(lab.relay_settings(
         token="t0ken", routes=str(routes), directory_room=directory,
     ))
     await relay.start()
@@ -157,7 +154,9 @@ to = "Reviewer"
         await relay.stop()
 
 
-async def test_route_table_delivers_to_a_friendly_name(named_relay, spawn_agent) -> None:
+async def test_route_table_delivers_to_a_friendly_name(
+    named_relay, spawn_agent, lab: LabHandle
+) -> None:
     relay, server, directory = named_relay
     rev = await spawn_agent("rev", "--join", directory, claude_name="Reviewer")
     await _until(lambda: asyncio.sleep(0, result=bool(
@@ -172,7 +171,7 @@ async def test_route_table_delivers_to_a_friendly_name(named_relay, spawn_agent)
     assert got["routed_by"] == "routes" and got["targets"] == [{"to": "Reviewer", "kind": "agent"}]
     ev = await rev.next_event()
     assert '"Friendly routing"' in ev["content"]
-    assert ev["meta"]["sender_jid"] == "webhook@xmpp.test"
+    assert ev["meta"]["sender_jid"] == lab.relay_jid
 
 
 async def test_envelope_to_a_friendly_name(named_relay, spawn_agent) -> None:
@@ -203,8 +202,8 @@ async def test_a_stranger_is_named_by_the_nick_in_its_first_message(spawn_agent)
     assert (await bld.next_event())["content"] == "hi Builder"
 
 
-async def test_busy_and_idle_show_as_presence(spawn_agent, ejabberd: EjabberdHandle) -> None:
-    room = _directory(ejabberd)
+async def test_busy_and_idle_show_as_presence(spawn_agent, lab: LabHandle) -> None:
+    room = _directory(lab)
     rev = await spawn_agent("rev", "--join", room, claude_name="Reviewer")
     bld = await spawn_agent("bld", "--join", room, claude_name="Builder")
     for status, expected in (("busy", ("dnd", "busy")), ("idle", ("available", "idle"))):
@@ -220,8 +219,8 @@ async def test_busy_and_idle_show_as_presence(spawn_agent, ejabberd: EjabberdHan
         await _until(seen)
 
 
-async def test_list_rooms_and_members(spawn_agent, ejabberd: EjabberdHandle) -> None:
-    room = _directory(ejabberd)
+async def test_list_rooms_and_members(spawn_agent, lab: LabHandle) -> None:
+    room = _directory(lab)
     rev = await spawn_agent("rev", "--join", room, claude_name="Reviewer")
     bld = await spawn_agent("bld", claude_name="Builder")  # not in the room
 
@@ -233,9 +232,15 @@ async def test_list_rooms_and_members(spawn_agent, ejabberd: EjabberdHandle) -> 
     assert entry["joined"] is False and entry["occupants"] == 1
     assert entry["public"] is True and entry["anonymous"] is False
 
-    # Members of a room we have not joined: nicks only, if the room shares them.
+    # Members of a room we have not joined: nicks only, if the room shares
+    # them. ejabberd does; Prosody keeps them from non-members (§6.5), which
+    # must read as "hidden", never as an empty room.
     outside = await bld.call("list_room_occupants", {"room_jid": room})
-    assert (outside["joined"], outside["occupants"]) == (False, [{"nick": "Reviewer"}])
+    assert outside["joined"] is False and outside["occupant_count"] == 1
+    if outside["occupants"]:
+        assert outside["occupants"] == [{"nick": "Reviewer"}]
+    else:
+        assert outside["hidden"] is True
 
     # Join it: now full detail, including the peer's friendly name and agent ID.
     await bld.call("join_room", {"room_jid": room})

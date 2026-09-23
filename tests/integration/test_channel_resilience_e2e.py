@@ -9,15 +9,14 @@ rooms, and keep pushing channel events — without the MCP session noticing.
 from __future__ import annotations
 
 import asyncio
-import subprocess
 import time
 import uuid
 
 import pytest
 
-from .conftest import EjabberdHandle, _wait_for_ejabberd
+from .conftest import LabHandle
 
-pytestmark = [pytest.mark.docker, pytest.mark.ejabberd]
+pytestmark = [pytest.mark.docker, pytest.mark.agents]
 
 
 async def _retry(coro_factory, timeout: float):
@@ -32,19 +31,15 @@ async def _retry(coro_factory, timeout: float):
 
 
 async def test_agent_reconnects_and_rejoins_after_server_restart(
-    spawn_agent, ejabberd: EjabberdHandle
+    spawn_agent, lab: LabHandle
 ) -> None:
-    room = ejabberd.room_jid(f"resil-{uuid.uuid4().hex[:8]}")
+    room = lab.room_jid(f"resil-{uuid.uuid4().hex[:8]}")
     agent = await spawn_agent("phoenix", "--join", room)
 
-    await asyncio.to_thread(
-        subprocess.run, ["docker", "restart", ejabberd.container],
-        check=True, capture_output=True,
-    )
-    await asyncio.to_thread(_wait_for_ejabberd, ejabberd)
+    await asyncio.to_thread(lab.restart)
 
     async def dm_round_trip() -> dict:
-        async with ejabberd.raw("alice") as alice:
+        async with lab.raw("alice") as alice:
             alice.send_chat(agent.jid, "are you back?")
             return await agent.next_event(timeout=5)
 
@@ -55,7 +50,7 @@ async def test_agent_reconnects_and_rejoins_after_server_restart(
     # Room occupancy was restored too (XEP-0045: it never survives a stream).
     identity = await agent.call("get_identity")
     assert identity["rooms"] == [{"room": room, "nick": agent.agent_name}]
-    async with ejabberd.raw("alice") as alice:
+    async with lab.raw("alice") as alice:
         await alice.join_muc(room, "alice")
         alice.send_groupchat(room, "room still works")
         ev = await agent.next_event(timeout=10)
