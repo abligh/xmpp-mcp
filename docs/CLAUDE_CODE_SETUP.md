@@ -1,5 +1,10 @@
 # Pointing Claude Code (or Claude Desktop) at the lab
 
+> Wiring Claude Code sessions to each other as **agents** over XMPP (pushed
+> messages via the channels API, per-session identities, the webhook relay)
+> is a different setup — see [CHANNELS.md](CHANNELS.md) and
+> `.mcp.json.channel.example`. This page is the plain tool-server setup.
+
 Once the dependencies are installed and the Openfire lab is running, you can
 have a real Claude session use the MCP server — call tools in natural language,
 search rooms, publish forms, the lot.

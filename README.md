@@ -18,6 +18,13 @@ It targets two XMPP server products in particular:
 The core messaging surface speaks standard RFC 6120/6121, so it also works
 against ejabberd, Prosody, and other compliant servers.
 
+It doubles as a **[Claude Code channel](docs/CHANNELS.md)**: run one server per
+Claude Code session and that session becomes an addressable agent on a shared
+XMPP server — messages from other agents, humans and webhooks are *pushed*
+into the session instead of polled. Agents can live in different containers,
+on different hosts, behind different model providers or billing accounts, and
+humans can join the same rooms from any XMPP client.
+
 ## Requirements
 
 - Python 3.11+
@@ -50,6 +57,11 @@ Common optional variables:
 | `XMPP_PORT` | `5222` | C2S port |
 | `XMPP_TLS_INSECURE` | `false` | Skip TLS cert checks (lab/self-signed only) |
 | `XMPP_NICK` | `xmpp-mcp` | Default MUC nickname |
+| `XMPP_CHANNEL` | `false` | Push inbound messages to Claude Code (`--channel`) |
+| `XMPP_AGENT_NAME` | — | This agent's name; fills `{agent}` in a JID template |
+| `XMPP_AUTO_JOIN` | — | Rooms to join at startup (`--join`, repeatable) |
+| `XMPP_CHANNEL_ALLOW` | `*@<own domain>` | Sender allowlist for the channel |
+| `XMPP_REGISTER` | `false` | Self-register the account (XEP-0077) |
 | `OPENFIRE_BASE_URL` | — | Enables `of_*` tools, e.g. `http://openfire:9090` |
 | `OPENFIRE_SECRET_KEY` | — | Openfire REST API shared secret |
 | `OPENFIRE_ADMIN_USER` / `OPENFIRE_ADMIN_PASSWORD` | — | Alternative to the secret key |
@@ -90,11 +102,34 @@ Add to `claude_desktop_config.json` (Claude Desktop) or your MCP client config:
 If you built the standalone executable (see below), point `command` at
 `dist\xmpp-mcp.exe` instead — no Python install needed on that machine.
 
+## Agent messaging (Claude Code channels)
+
+```bash
+# one xmpp-mcp per Claude Code session; JID templated from agent name + host
+xmpp-mcp --channel --agent-name reviewer --jid '{agent}.{host}@xmpp.example.com' \
+         --register --join agents@conference.xmpp.example.com
+
+# start the session with the channel loaded (research-preview flag)
+claude --dangerously-load-development-channels server:xmpp
+```
+
+Inbound messages arrive in the session as
+`<channel source="xmpp" sender="alice@example.com/laptop" type="chat" reply_to="…">…</channel>`,
+and Claude answers with the `reply` tool. `list_agents` is the XMPP
+counterpart of Claude Code's `ListAgents` (canonical JID, internal agent ID,
+human-facing name, presence), and the bundled **`xmpp-webhook-relay`** turns
+GitHub/GitLab/CI webhooks into messages for an agent or a room without
+spending a single token — each sender authenticated by its own scheme
+(GitHub HMAC, GitLab token, or a shared bearer token). Full guide: **[docs/CHANNELS.md](docs/CHANNELS.md)**.
+
 ## Tools
 
 | Tool | Description |
 |---|---|
 | `send_message` | Send a 1:1 chat message (optional XEP-0258 `security_label`) |
+| `reply` | Answer a channel message — groupchat to a joined room, 1:1 otherwise |
+| `list_agents` | Reachable agents/people: JID, agent ID, name, presence, rooms |
+| `get_identity` | This agent's own JID, name, ID and rooms |
 | `get_recent_messages` | Drain buffered inbound messages |
 | `search_messages` | Non-destructive search over the inbox (by query/room/participant/since) — powers "who said X about Y" |
 | `mam_query` | Query server-side MUC history (XEP-0313); works on ejabberd, see notes for Openfire |
@@ -156,6 +191,11 @@ Three layers:
 # in-process, asserts on real messaging, MUC, presence, discovery and `of_*`
 # admin behaviour. Requires Docker Desktop. ~20s total.
 .\.venv\Scripts\python.exe -m pytest -m docker
+
+# Channel / multi-agent suite: boots the ejabberd lab and drives real
+# `xmpp-mcp --channel` subprocesses over stdio JSON-RPC, exactly as Claude
+# Code does. Run on its own — the two labs share ports.
+.\.venv\Scripts\python.exe -m pytest -m ejabberd
 
 # Opt-in single-host integration test (just XMPP connect/disco) against a
 # server you provide via env vars.

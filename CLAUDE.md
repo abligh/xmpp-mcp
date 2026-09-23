@@ -5,14 +5,20 @@ roster/presence, service discovery, **XEP-0258 security labels** (Isode
 M-Link), full **XEP-0060 pubsub + XEP-0004 data forms**, plus admin over the
 Openfire REST API plugin.
 
+Also a **Claude Code channel** (`--channel`): one server per Claude session
+turns that session into an addressable agent on a shared XMPP server, with
+inbound messages *pushed* into the session (no polling) — plus a standalone
+**webhook→XMPP relay**. See `docs/CHANNELS.md`.
+
 Targets two XMPP server products in particular: **Openfire** (open-source) and
 **Isode M-Link** (commercial, military-grade). The core messaging surface is
 RFC 6120/6121 so it also works against ejabberd, Prosody, etc.
 
 ## Stack & layout
 
-Python 3.11+ • FastMCP v2 (`fastmcp` ≥ 2.0) • slixmpp (1.15+) • httpx •
-pydantic-settings.
+Python 3.11+ • FastMCP 4.x (`fastmcp>=4,<5`; channel mode needs its
+`experimental_capabilities=` and notification middleware) • slixmpp (1.15+) •
+httpx • pydantic-settings • aiohttp (the webhook relay, `[webhook]` extra).
 
 ```
 src/xmpp_mcp/
@@ -22,6 +28,23 @@ src/xmpp_mcp/
   config.py              # pydantic-settings Settings (XMPP_* + OPENFIRE_*)
   xmpp_client.py         # slixmpp ClientXMPP wrapper, inbox deque,
                          #   pubsub event buffer, pubsub property
+  channel.py             # Claude Code channel: notification model, sender
+                         #   gate, queue/pump, session-binding middleware
+  identity.py            # {session}/{agent}/{host}/{fqdn} JID templating
+  claude_session.py      # find + watch the Claude Code session file
+                         #   (session ID -> canonical JID, name -> friendly name)
+  agents.py              # <agent/> presence extension + presence cache
+  webhook_relay/         # standalone HTTP→XMPP relay (aiohttp + slixmpp)
+    __init__.py          #   public surface + CLI entry point
+    settings.py          #   WEBHOOK_* settings
+    routing.py           #   which JID(s) a request targets: explicit,
+                         #     envelope, route table, defaults
+    routes.py            #   the operator's TOML route table
+    stanza.py            #   scrubbing + byte budget for arbitrary payloads
+    auth.py              #   may this caller inject a message at all?
+    relay.py             #   XMPP connection, delivery queue, HTTP endpoint
+    providers/           #   THE source-specific layer: github, gitlab, generic
+                         #     (how to authenticate and summarise one sender)
   data_forms.py          # XEP-0004 DataForm / FormField TypedDicts;
                          #   parse_form, build_form_element, build_submit_form
   security_labels.py     # XEP-0258 catalog fetch + label builder (M-Link)
@@ -37,6 +60,7 @@ src/xmpp_mcp/
     disco.py             # discover_features, list_security_labels + resource
     pubsub.py            # 23 pubsub tools (see "Pubsub surface" below)
     mam.py               # mam_query — XEP-0313 historical room queries
+    agents.py            # reply, list_agents, get_identity
     admin.py             # Openfire of_* tools
 
 tests/                   # unit tests (no network)
@@ -46,6 +70,14 @@ tests/                   # unit tests (no network)
   test_security_labels.py
   test_openfire_admin.py
   test_pubsub_events.py
+  test_identity.py           # JID templating / normalisation
+  test_channel.py            # gate, payload, pump, middleware, server wiring
+  test_agents.py             # presence extension, cache, list_agents
+  test_webhook_relay.py      # relay core: routing, stanza safety, HTTP, delivery
+  test_webhook_providers.py  # per-sender auth + summaries; no-downgrade rule
+  test_webhook_routing.py    # envelope, route table, names, per-provider dedupe
+  test_claude_session.py     # session discovery/watching, renames, addressing
+  test_muc_client.py         # MUC bookkeeping: nicks, room keys, occupants
   test_xmpp_client.py        # opt-in `integration` marker, needs live server
 
 tests/integration/       # docker-based E2E (two labs available — see below)
@@ -55,14 +87,19 @@ tests/integration/       # docker-based E2E (two labs available — see below)
     Dockerfile.openfire  # nasqueron/openfire:4.8.1 + REST API plugin + autosetup
     openfire.xml         # <autosetup/> pre-creates bot/alice/bob/carol
     docker-compose.yml   # project name xmpp-mcp-test; exposes 5222/5269/5275/9090
-    ejabberd/            # alternative lab — MAM actually works here
+    ejabberd/            # alternative lab — MAM works, and the lab the
+                         #   channel/agent suites need (open XEP-0077
+                         #   registration + non-anonymous rooms)
       docker-compose.yml # project name xmpp-mcp-ej; same ports + 5280 admin
-      ejabberd.yml       # mod_mam, mod_muc with mam=true on every room
+      ejabberd.yml       # mod_mam, mod_muc (mam=true, anonymous=false),
+                         #   mod_register + registration_timeout: infinity
   helpers/
     raw_client.py        # RawXMPPClient — slixmpp wrapper for the "other side"
     chat_script.py       # ChatScript — scripted multi-room conversations
     seclabel_component.py # SecurityLabelComponent — XEP-0114 stub of M-Link's
                          #   XEP-0258 catalog (on seclabel.xmpp.test)
+    stdio_mcp.py         # raw JSON-RPC stdio client — the only way to observe
+                         #   channel notifications (see gotcha #20)
   test_smoke.py
   test_messaging_e2e.py
   test_muc_e2e.py
@@ -76,6 +113,12 @@ tests/integration/       # docker-based E2E (two labs available — see below)
   test_resilience_e2e.py         # 3 tests — docker pause/unpause survival
   test_llm_driven_e2e.py         # 1 test — real Claude session via Anthropic SDK
                                  #   (opt-in: needs ANTHROPIC_API_KEY)
+  test_channel_e2e.py            # 13 tests — `ejabberd` marker: channel push,
+                                 #   reply, MUC echo suppression, gate, agents
+  test_webhook_relay_e2e.py      # 5 tests — HTTP → relay → agent channel
+  test_channel_resilience_e2e.py # 1 test  — reconnect + re-join after restart
+  test_identity_e2e.py           # 6 tests — canonical JIDs, friendly names,
+                                 #   live renames, name-routed webhooks
 
 scripts/                 # one-off demo runners (use the test fixtures + an
   demo_chat_search.py    #   in-process FastMCP Client)
@@ -87,6 +130,13 @@ scripts/                 # one-off demo runners (use the test fixtures + an
 **Messaging / MUC / presence / discovery / admin** — see `src/xmpp_mcp/tools/`.
 
 Notably:
+
+- `reply(to, message, thread?)` — answer a channel message; routes to
+  groupchat for a joined room, 1:1 otherwise.
+- `list_agents(include_offline?, agents_only?)` — the XMPP equivalent of
+  Claude Code's `ListAgents`: roster contacts + occupants of joined rooms,
+  each with canonical JID, internal agent ID, human-facing name and presence.
+- `get_identity()` — this agent's own JID / name / ID / rooms.
 
 - `search_messages(query?, room?, participant?, since?, limit?)` — non-destructive
   search over the inbox. Powers "who said X about Y" workflows. Inbox records
@@ -117,21 +167,27 @@ items (PEP, ATOM, JSON-in-pubsub).
 python -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -e ".[dev]"
 
-# unit tests (fast, no network) — 44 tests, ~2.5s
+# unit tests (fast, no network) — ~300 tests, a few seconds
 .\.venv\Scripts\python.exe -m pytest -m "not docker and not integration"
 
-# full docker-based E2E suite (boots Openfire) — 52 tests, ~70s
+# full docker-based E2E suite (boots Openfire) — ~57 tests, ~75s
 .\.venv\Scripts\python.exe -m pytest -m docker
 
 # wire-protocol tests against the built .exe (subset of docker)
 .\.venv\Scripts\pyinstaller.exe xmpp-mcp.spec   # rebuild if stale!
 .\.venv\Scripts\python.exe -m pytest -m wire
 
+# channel / multi-agent suite — needs the ejabberd lab, NOT Openfire.
+# Must run on its own: the two labs bind the same ports (conftest deselects
+# these whenever Openfire tests are selected too).
+.\.venv\Scripts\python.exe -m pytest -m ejabberd
+
 # bring up the lab — choose the right server for the job
 python start-lab.py              # Openfire (legacy, of_* admin works,
                                  #   MAM doesn't — see gotcha #16)
 python start-lab-ejabberd.py     # ejabberd 25.04 (MAM works, no Openfire REST,
-                                 #   what you want for cross-session history)
+                                 #   open registration + non-anonymous rooms —
+                                 #   what the channel/agent suites need)
 
 # real-LLM tests (opt-in, costs API tokens, needs ANTHROPIC_API_KEY)
 $env:ANTHROPIC_API_KEY = "sk-…"
@@ -152,9 +208,23 @@ python scripts\demo_chat_search.py              # multi-room chat + search_messa
 python scripts\demo_pubsub_forms.py             # publish form, 3 fills, read back
 ```
 
+Channel mode (see `docs/CHANNELS.md` for the whole story):
+
+```powershell
+# one agent per Claude Code session
+xmpp-mcp --channel --agent-name reviewer --register --join agents@conference.xmpp.test
+claude --dangerously-load-development-channels server:xmpp
+
+# the global webhook→XMPP relay (one per host)
+xmpp-webhook-relay                      # WEBHOOK_* env; HTTP on 127.0.0.1:8788
+```
+
 Required env vars: `XMPP_JID`, `XMPP_PASSWORD`. Optional: `XMPP_HOST`,
 `XMPP_PORT`, `XMPP_TLS_INSECURE`, `XMPP_NICK`, `OPENFIRE_BASE_URL` +
-`OPENFIRE_ADMIN_USER` / `OPENFIRE_ADMIN_PASSWORD` (enables `of_*` tools). See
+`OPENFIRE_ADMIN_USER` / `OPENFIRE_ADMIN_PASSWORD` (enables `of_*` tools).
+Channel/agent mode adds `XMPP_CHANNEL`, `XMPP_AGENT_NAME`, `XMPP_AGENT_ID`,
+`XMPP_DISPLAY_NAME`, `XMPP_AGENT_HOST`, `XMPP_AUTO_JOIN`,
+`XMPP_CHANNEL_ALLOW`, `XMPP_REGISTER`; the relay reads `WEBHOOK_*`. See
 `.env.example`.
 
 ## Architectural conventions
@@ -167,6 +237,22 @@ Required env vars: `XMPP_JID`, `XMPP_PASSWORD`. Optional: `XMPP_HOST`,
 - **Shared state lives in `ctx.lifespan_context`** (keys: `xmpp`, `settings`,
   `openfire`). Helpers in `tools/__init__.py`: `get_xmpp`, `get_settings`,
   `get_openfire` (the last raises a clean ToolError when not configured).
+- **Settings are loaded in `create_server()`**, not the lifespan: channel mode
+  changes what the server declares at `initialize` (capability + instructions).
+  `create_server(**overrides)` takes CLI-flag overrides; `None` values are
+  ignored so an unset flag never masks an env var.
+- **Channel pushes go through `ChannelBridge`**, never straight from a slixmpp
+  handler: the handler only enqueues (sync, non-blocking), a pump task awaits
+  the MCP session. The inbox deque is still filled for `get_recent_messages`
+  / `search_messages`, whether or not channel mode is on.
+- **Tools that touch slixmpp state are `async`**, so FastMCP runs them on the
+  event loop; a sync tool runs in a worker thread and races the XML stream.
+- **Addresses: JIDs route, names resolve.** Anything with an `@` is a JID;
+  anything else goes through `XMPPClient.resolve_address` (friendly name,
+  agent ID, roster name or nick — exactly one match, or an error).
+- **Every JID a tool accepts is parsed** with `xmpp_client.parse_jid`, and
+  anything returned in a tool result is a `str` — never a slixmpp `JID`
+  object (gotcha #22).
 - **DataForm dicts, never raw XML, in MCP responses.** Returning a
   `TypedDict` directly from a FastMCP tool wraps it in a Pydantic root model
   on the client side (non-subscriptable); declare return type as
@@ -267,11 +353,133 @@ Required env vars: `XMPP_JID`, `XMPP_PASSWORD`. Optional: `XMPP_HOST`,
     works. The CLI accepts plaintext passwords and the server stores the
     SCRAM-derived secrets internally. No special bootstrap needed beyond
     `ejabberdctl register <user> <domain> <password>`.
+20. **MCP clients drop unknown notification methods — test channels on the
+    wire.** `notifications/claude/channel` is a Claude Code extension, not a
+    core MCP type, so the FastMCP/`mcp` client parses it, finds no binding and
+    discards it: an in-process `fastmcp.Client` can never observe a channel
+    push. The e2e suite therefore drives `python -m xmpp_mcp` as a subprocess
+    and speaks raw newline-delimited JSON-RPC over its stdio
+    (`tests/integration/helpers/stdio_mcp.py`), exactly like Claude Code.
+    Related: `fastmcp.Client` defaults to the modern (2026-07-28) protocol,
+    which has **no `initialize` handshake at all** — pass `mode="legacy"` to
+    exercise the handshake path. Claude Code likewise refuses to register a
+    channel server that negotiates 2026-07-28, so don't set
+    `MCP_PROTOCOL_NEGOTIATION=auto` for agent sessions.
+21. **Notifications may only be pushed after `notifications/initialized`.**
+    The session's standalone outbound channel isn't usable before the client
+    finishes initialising, and the MCP lifecycle forbids it. `ChannelBridge`
+    binds in a FastMCP notification middleware at exactly that point and
+    queues anything that arrives earlier (XMPP connects during the lifespan,
+    i.e. *before* initialize, so offline messages routinely land first).
+22. **slixmpp hands back JID objects, which break structured tool output.**
+    `xep_0045.get_jid_property(room, nick, "jid")` returns a `JID`, not a
+    `str`. Returned as-is from a tool, FastMCP can't serialise the result and
+    silently emits text content only — and a strict client then fails with
+    "has an output schema but did not return structured content". Only
+    disclosed-real-JID (non-anonymous) rooms hit it, which is why it stayed
+    hidden until the ejabberd lab. Stringify at the boundary.
+23. **MUC presence stops firing the generic `presence` event.** After an
+    occupant's first presence, `xep_0045._handle_presence` sets
+    `ignore_updates` on it, and `basexmpp._handle_presence` then returns early
+    — so a presence cache built only on `presence` goes stale for rooms.
+    Subscribe to `groupchat_presence` as well (updates are idempotent).
+24. **`client_roster` is not the roster.** slixmpp creates a roster entry for
+    *any* JID that sends presence, including MUC rooms, so iterating it
+    invents contacts. Track real membership from the `roster_update` event
+    (the roster result plus RFC 6121 §2.1.6 pushes) instead.
+25. **A presence broadcast doesn't reach rooms.** RFC 6121 §4.4 broadcast
+    presence goes to roster contacts only; room occupants see a change only if
+    it is *also* sent as directed presence to `room@service/nick`
+    (XEP-0045 §7.7). `set_presence` sends both.
+26. **slixmpp never reconnects by itself.** `connection_lost` fires
+    `disconnected` and stops; only an explicit `connect()` brings the stream
+    back. Both the agent client and the relay reconnect on `disconnected`
+    with 1s→30s backoff, and the agent re-joins its rooms on the new session
+    (occupancy never survives a stream).
+27. **ejabberd `mod_register` config traps.** `welcome_message` must be a map,
+    not a string — passing `none` makes the server refuse to start. And
+    registrations are rate-limited to one per source IP per 600 s by default
+    (`registration_timeout: infinity` in the lab), which every agent in a
+    container hits because they all share the docker bridge IP.
+
+28. **`fnmatch` globs cross `@` and `/` — never match a full JID against an
+    account pattern.** A resourcepart may legally contain `@` (RFC 7622
+    opaquestring) and a MUC nick is peer-chosen, so `*@example.com` is
+    satisfied by `mallory@evil.test/spoof@example.com` or by an occupant who
+    takes the nick `alice@example.com`. `SenderGate` therefore matches
+    account patterns (no `/`) against the **bare** JID only, and occupant
+    patterns (with `/`) against the occupant JID only.
+29. **A payload can kill the XML stream.** Characters XML 1.0 §2.2 forbids
+    (most C0 controls, lone surrogates) serialise raw into a stanza and make
+    the server's parser abort the connection — every queued message is lost
+    and `msg.send()` raises nothing, so it looks like success. Anything
+    reaching a stanza body from outside is scrubbed (`webhook_relay.stanza.scrub`).
+    Budget stanza size in **bytes after XML escaping**, not characters: one
+    emoji is 4 bytes and `&` becomes 5.
+30. **`hmac.compare_digest` raises TypeError on non-ASCII `str`.** aiohttp
+    hands header values over as latin-1 text, so comparing a secret straight
+    from a header turns any auth check into a 500 for an attacker who sends a
+    high byte. Encode both sides to bytes first.
+31. **slixmpp writes straight to the asyncio transport.** There is no send
+    queue to inspect (`send_queue` does not exist in 1.17): "the stanza is on
+    the wire" means `transport.get_write_buffer_size()` reached 0 while the
+    session was still up. A stanza handed over to a dying stream is dropped
+    silently, so "no exception" must not be counted as delivered.
+32. **`disconnect()` does not stop slixmpp's connect loop.** It only cancels
+    an in-flight attempt when a transport exists, so a `stop()` issued while
+    slixmpp is retrying leaves the loop running — it can succeed later and
+    resurrect a "stopped" client that peers still see online. Call
+    `cancel_connection_attempt()`, and bound the `disconnect()` await: it
+    waits for a stream close that never comes if you were never connected.
+33. **`asyncio.wait_for` cancels the future it waits on.** After a `start()`
+    timeout, `self._ready.done()` is True but `.exception()` raises
+    `CancelledError` — a `BaseException` that slixmpp's event dispatch does
+    not contain, so it escapes the handler. Check `.cancelled()` first.
+34. **The room, not the client, decides the MUC nick.** XEP-0045 §7.2.9 lets
+    the service assign one, JID prep can fold the requested one (NFD vs NFC),
+    and status 303 renames later. slixmpp tracks the truth in
+    `xep_0045.our_nicks`; a client that keeps the nick it *asked* for will
+    fail to recognise its own reflected messages — which, in channel mode,
+    means pushing its own room posts back into its own session. Track code
+    110 self-presence.
+35. **Canonicalise room JIDs in one place.** JIDs compare case-insensitively,
+    so if `join_room` preps the key but `send_groupchat` / `leave_room` do
+    raw dict lookups, `join_room("Room@Conf.X")` succeeds and every later
+    call with the same string reports "not joined" (`room_key`).
+36. **A slixmpp stanza is its own iterator — never iterate one in a handler.**
+    `ElementBase.__iter__` returns `self` and resets an index stored on the
+    stanza. xep_0060 fires `pubsub_publish` *synchronously from inside its own
+    loop over the items*, so a handler that also iterates
+    `msg["pubsub_event"]["items"]` rewinds that loop and gets fired again, for
+    ever — the event loop spins at 100% and eventually segfaults. A dedupe on
+    `msg["id"]` hid it, until ejabberd sent PEP notifications, which carry no
+    id (RFC 6120 makes it optional). Iterate `.iterables` (a plain list), and
+    recognise repeat fires by stanza identity.
+37. **In pydantic v2 a validator's own assignment marks a field as set.** After
+    `self.xmpp_nick = …` in a `model_validator`, `"xmpp_nick" in
+    model_fields_set` is True, so "was it configured?" can no longer be asked.
+    Record it in a `PrivateAttr` *before* defaulting (`nick_is_explicit`) —
+    otherwise room nicks silently never follow a rename.
+38. **After a MUC nick change, ejabberd re-broadcasts the presence you joined
+    with.** The status-303 dance moves the nick, but occupants see the old
+    extension elements (here, the old `<agent name>`). Send a status update
+    under the new nick once 303 arrives.
+39. **The Claude Code session file is undocumented and changes over time.**
+    `~/.claude/sessions/<pid>.json`: `sessionId` is stable, `name` is not —
+    `nameSource` goes `derived` (from the cwd) → `auto` (Claude names it) or
+    `user` (`--name`, `CLAUDE_CODE_SESSION_NAME`, a rename), plus
+    `collision`, `peer`, `hook`. Read it defensively, watch it, and never build
+    a canonical address from the name. Unit tests pin `XMPP_CLAUDE_SESSION=off`
+    (tests/conftest.py), because under Claude Code the suite would otherwise
+    adopt the developer's own session.
 
 ## Test markers
 
 - `not docker and not integration` → fast unit tests, no network/Docker
 - `docker` → boots Openfire container; superset of `wire`
+- `ejabberd` → channel / multi-agent suites against the ejabberd lab. Also
+  marked `docker` (so unit runs skip them), but deselected automatically when
+  Openfire tests are selected — run `pytest -m ejabberd` on its own
 - `wire` → drives `dist\xmpp-mcp.exe` over real MCP stdio JSON-RPC (subset of `docker`)
 - `llm` → real Claude session via Anthropic SDK (needs `ANTHROPIC_API_KEY`)
 - `integration` → opt-in connect/disco test against a user-provided server
@@ -293,6 +501,24 @@ Required env vars: `XMPP_JID`, `XMPP_PASSWORD`. Optional: `XMPP_HOST`,
 
 ## Known limitations / non-goals
 
+- **Channel push requires the stdio transport.** Notifications ride the
+  connection's standalone channel, which only exists after an `initialize`
+  handshake; FastMCP's HTTP transport answers a modern client without one, so
+  nothing is delivered (the server warns at startup). Claude Code spawns MCP
+  servers over stdio, which is the supported path.
+- **Channel security.** The lab runs plain-text c2s with a shared agent
+  password and open in-band registration. Production needs real TLS,
+  per-agent credentials, registration closed, and the relay behind
+  `WEBHOOK_TOKEN` / `WEBHOOK_GITHUB_SECRET`. The permission-relay capability
+  (`claude/channel/permission`) is deliberately not declared yet.
+- **Relay delivery is at-most-once.** The queue survives an XMPP outage but
+  not a relay restart; XEP-0198 stream management would close the gap.
+- **Webhook authentication is per-sender, and only as strong as the scheme
+  the sender offers.** GitHub signs the body (good, but the signature does
+  not cover the destination and never expires — hence delivery-ID
+  de-duplication and `WEBHOOK_ALLOWED_TARGETS`); GitLab and the generic
+  fallback use a replayable shared token, so they want TLS in front. Source-IP
+  restriction has to happen at the proxy, since the relay only sees the peer.
 - **PEP-typed wrappers** (XEP-0163 `user_avatar` / `user_nick` / `user_tune`):
   not exposed. Plain pubsub at a user's bare JID works today (pass
   `service=<user-jid>`).

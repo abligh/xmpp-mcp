@@ -34,6 +34,7 @@ Test markers (see `pyproject.toml`):
 | *(none)* | Pure unit tests — run anywhere. |
 | `docker` | Docker Desktop; boots Openfire via docker compose. |
 | `wire` | A current `dist\xmpp-mcp.exe` (subset of `docker`). |
+| `ejabberd` | Docker; channel / multi-agent suites against the ejabberd lab. Run alone: `pytest -m ejabberd`. |
 | `integration` | A live XMPP server you provide via env vars. |
 | `llm` | `ANTHROPIC_API_KEY` — opt-in, real Claude session. |
 
@@ -61,6 +62,10 @@ Claude Desktop at the lab. See `docs/CLAUDE_CODE_SETUP.md`.
 - MCP responses exchange `DataForm` dicts, never raw XML.
 - `CLAUDE.md` documents the architecture and a list of server-specific gotchas
   worth reading before changing the XMPP or pubsub layers.
+- Channel mode, per-agent identities and the webhook relay are documented in
+  `docs/CHANNELS.md`. Channel notifications can only be observed over real
+  stdio JSON-RPC (an in-process MCP client drops unknown methods) — see
+  `tests/integration/helpers/stdio_mcp.py`.
 
 Please run the unit tests before opening a PR; add a test for any behaviour you
 change.

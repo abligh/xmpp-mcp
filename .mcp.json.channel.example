@@ -1,0 +1,22 @@
+{
+  "_comment": "Channel/agent flavour of .mcp.json — one xmpp-mcp per Claude Code session, pushing inbound XMPP messages into it. Copy to .mcp.json (gitignored) and adjust; use absolute paths in a user-level ~/.claude.json. Values shown match the ejabberd lab (python start-lab-ejabberd.py). Nothing here is per-session: each server finds the Claude Code session that launched it, uses the session ID for the canonical JID and follows the session's name as its friendly name. Launch with: claude --name Reviewer --dangerously-load-development-channels server:xmpp  (--name is optional; see docs/CHANNELS.md)",
+  "mcpServers": {
+    "xmpp": {
+      "command": ".venv/bin/xmpp-mcp",
+      "args": [
+        "--channel",
+        "--register",
+        "--join", "agents@conference.xmpp.test"
+      ],
+      "env": {
+        "XMPP_JID": "{session}.{host}@xmpp.test",
+        "XMPP_PASSWORD": "agentpw",
+        "XMPP_AGENT_HOST": "${HOSTNAME:-localhost}",
+        "XMPP_HOST": "127.0.0.1",
+        "XMPP_PORT": "5222",
+        "XMPP_TLS_INSECURE": "true",
+        "XMPP_CHANNEL_ALLOW": "*@xmpp.test"
+      }
+    }
+  }
+}
