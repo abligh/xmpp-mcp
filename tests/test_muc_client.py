@@ -44,8 +44,8 @@ async def test_room_occupants_are_json_serialisable(monkeypatch: pytest.MonkeyPa
     monkeypatch.setattr(muc, "get_jid_property", lambda room, nick, prop: props.get(prop))
 
     occupants = c.room_occupants(ROOM)
-    assert occupants == [{"nick": "alice", "role": "participant",
-                          "affiliation": "member", "jid": "alice@xmpp.test/laptop"}]
+    assert occupants == [{"nick": "alice", "role": "participant", "affiliation": "member",
+                          "jid": "alice@xmpp.test/laptop", "me": False}]
     json.dumps(occupants)  # must not raise
 
 
@@ -56,7 +56,7 @@ async def test_room_occupants_without_disclosed_jid(monkeypatch: pytest.MonkeyPa
     monkeypatch.setattr(muc, "get_roster", lambda room: ["anon"])
     monkeypatch.setattr(muc, "get_jid_property", lambda room, nick, prop: None)
     assert c.room_occupants(ROOM) == [
-        {"nick": "anon", "role": "", "affiliation": "", "jid": ""}
+        {"nick": "anon", "role": "", "affiliation": "", "jid": "", "me": False}
     ]
 
 
@@ -169,3 +169,104 @@ async def test_a_confirmed_rename_refreshes_our_presence(monkeypatch: pytest.Mon
     pres["muc"]["item_nick"] = "new-nick"
     c._on_muc_self_presence(pres)
     assert sent == [f"{ROOM}/new-nick"]
+
+
+# --- rooms: discovery and members ---------------------------------------------
+
+
+def _room_info_iq(c: XMPPClient, features: list[str], fields: dict[str, str], name: str) -> Any:
+    iq = c.xmpp.Iq()
+    info = iq["disco_info"]
+    info.add_identity("conference", "text", name=name)
+    for f in features:
+        info.add_feature(f)
+    form = c.xmpp.plugin["xep_0004"].make_form(ftype="result")
+    form.add_field(var="FORM_TYPE", ftype="hidden", value="http://jabber.org/protocol/muc#roominfo")
+    for var, value in fields.items():
+        form.add_field(var=var, value=value)
+    info.append(form)
+    return iq
+
+
+async def test_room_info_is_read_from_disco(monkeypatch: pytest.MonkeyPatch) -> None:
+    c = _client()
+
+    async def get_info(jid: str, cached: bool = False) -> Any:
+        return _room_info_iq(
+            c, ["muc_public", "muc_nonanonymous", "muc_persistent"],
+            {"muc#roominfo_description": "Where the agents meet",
+             "muc#roominfo_occupants": "4", "muc#roominfo_subject": "standup"},
+            name="Agents",
+        )
+
+    monkeypatch.setattr(c.xmpp.plugin["xep_0030"], "get_info", get_info)
+    info = await c._room_info(ROOM)
+    assert info == {
+        "public": True, "members_only": False, "password_protected": False,
+        "anonymous": False, "persistent": True, "name": "Agents",
+        "description": "Where the agents meet", "occupants": 4, "subject": "standup",
+    }
+
+
+async def test_list_rooms_includes_joined_rooms(monkeypatch: pytest.MonkeyPatch) -> None:
+    """disco lists public rooms only; the ones we are in must still show."""
+    c = _client()
+    c._joined_rooms["hidden@conference.xmpp.test"] = "bot"
+
+    async def disco_items(jid: str | None = None) -> list[dict[str, str]]:
+        return [{"jid": ROOM, "node": "", "name": "Agents"}]
+
+    async def room_info(room: str) -> dict[str, Any]:
+        return {"occupants": 2}
+
+    monkeypatch.setattr(c, "disco_items", disco_items)
+    monkeypatch.setattr(c, "_room_info", room_info)
+    got = await c.list_rooms("conference.xmpp.test")
+    by_room = {r["room"]: r for r in got["rooms"]}
+    assert set(by_room) == {ROOM, "hidden@conference.xmpp.test"}
+    assert by_room[ROOM]["joined"] is False and by_room[ROOM]["name"] == "Agents"
+    assert by_room["hidden@conference.xmpp.test"]["joined"] is True
+    assert by_room["hidden@conference.xmpp.test"]["nick"] == "bot"
+
+
+async def test_joined_room_occupants_carry_agent_details(monkeypatch: pytest.MonkeyPatch) -> None:
+    c = _client()
+    c._joined_rooms[ROOM] = "bot"
+    muc = c.xmpp.plugin["xep_0045"]
+    monkeypatch.setattr(muc, "get_roster", lambda room: ["bot", "Reviewer"])
+    monkeypatch.setattr(muc, "get_jid_property", lambda room, nick, prop: None)
+    pres = c.xmpp.make_presence(pfrom=f"{ROOM}/Reviewer", pto="bot@xmpp.test/r", pshow="dnd",
+                                pstatus="busy")
+    info = pres["mcp_agent"]
+    info["id"], info["name"] = "sess-r", "Reviewer"
+    c.presence.update(pres)
+    occ = {o["nick"]: o for o in c.room_occupants(ROOM)}
+    assert occ["bot"]["me"] is True
+    assert (occ["Reviewer"]["name"], occ["Reviewer"]["agent_id"]) == ("Reviewer", "sess-r")
+    assert (occ["Reviewer"]["presence"], occ["Reviewer"]["status"]) == ("dnd", "busy")
+
+
+async def test_members_of_a_room_we_are_not_in(monkeypatch: pytest.MonkeyPatch) -> None:
+    c = _client()
+
+    async def disco_items(jid: str | None = None) -> list[dict[str, str]]:
+        return [{"jid": f"{ROOM}/alice", "node": "", "name": ""},
+                {"jid": f"{ROOM}/Reviewer", "node": "", "name": ""}]
+
+    monkeypatch.setattr(c, "disco_items", disco_items)
+    got = await c.room_members(ROOM)
+    assert got == {"room": ROOM, "joined": False,
+                   "occupants": [{"nick": "alice"}, {"nick": "Reviewer"}]}
+
+
+async def test_a_room_that_hides_its_members(monkeypatch: pytest.MonkeyPatch) -> None:
+    from xmpp_mcp.xmpp_client import XMPPError
+
+    c = _client()
+
+    async def refuse(jid: str | None = None) -> list[dict[str, str]]:
+        raise XMPPError("forbidden")
+
+    monkeypatch.setattr(c, "disco_items", refuse)
+    with pytest.raises(XMPPError, match="join_room to see them"):
+        await c.room_members(ROOM)

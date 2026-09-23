@@ -137,6 +137,10 @@ Notably:
   Claude Code's `ListAgents`: roster contacts + occupants of joined rooms,
   each with canonical JID, internal agent ID, human-facing name and presence.
 - `get_identity()` — this agent's own JID / name / ID / rooms.
+- `list_rooms(service?, limit?)` — rooms on the MUC service(s) with name,
+  occupant count and flags; joined rooms always included.
+- `list_room_occupants(room_jid)` — joined: full detail incl. each agent's
+  friendly name / agent ID / presence; not joined: nicks via disco#items.
 
 - `search_messages(query?, room?, participant?, since?, limit?)` — non-destructive
   search over the inbox. Powers "who said X about Y" workflows. Inbox records

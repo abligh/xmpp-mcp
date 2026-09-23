@@ -894,19 +894,128 @@ class XMPPClient:
             # rooms that disclose real JIDs) — stringify it, or the tool result
             # is not JSON-serialisable and loses its structured content.
             real = muc.get_jid_property(room, nick, "jid")
-            occupants.append(
-                {
-                    "nick": nick,
-                    "role": muc.get_jid_property(room, nick, "role") or "",
-                    "affiliation": muc.get_jid_property(room, nick, "affiliation") or "",
-                    "jid": str(real) if real else "",
-                }
-            )
+            entry = {
+                "nick": nick,
+                "role": muc.get_jid_property(room, nick, "role") or "",
+                "affiliation": muc.get_jid_property(room, nick, "affiliation") or "",
+                "jid": str(real) if real else "",
+                "me": nick == self._joined_rooms[room],
+            }
+            seen = self.presence.get(f"{room}/{nick}")
+            if seen:
+                agent = seen.get("agent") or {}
+                entry["presence"] = seen["show"]
+                entry["status"] = seen["status"]
+                if agent:
+                    entry["name"] = agent.get("name") or nick
+                    entry["agent_id"] = agent.get("id") or None
+            occupants.append(entry)
         return occupants
 
     @property
     def joined_rooms(self) -> list[str]:
         return list(self._joined_rooms)
+
+    async def muc_services(self) -> list[str]:
+        """MUC services on our server: disco#items items whose identity is
+        ``conference/text`` (XEP-0045 §6.1)."""
+        services: list[str] = []
+        for item in await self.disco_items():
+            try:
+                info = await self.disco_info(item["jid"])
+            except XMPPError:
+                continue
+            if any(i["category"] == "conference" and i["type"] == "text"
+                   for i in info["identities"]):
+                services.append(item["jid"])
+        return services
+
+    async def list_rooms(self, service: str | None = None, limit: int = 50) -> dict[str, Any]:
+        """Rooms on one MUC service (or all of ours), with what disco reveals.
+
+        XEP-0045 §6.3 disco#items lists the *public* rooms; §6.4 disco#info on
+        each adds its name, occupant count and flags. Rooms we are in are
+        always included, public or not.
+        """
+        services = [parse_jid(service, "MUC service").bare] if service else await self.muc_services()
+        rooms: dict[str, dict[str, Any]] = {}
+        for svc in services:
+            for item in await self.disco_items(svc):
+                rooms.setdefault(room_key(item["jid"]), {"name": item["name"] or None})
+        for room in self._joined_rooms:
+            if not service or JID(room).domain == JID(service).domain:
+                rooms.setdefault(room, {"name": None})
+        listed = sorted(rooms)[:limit]
+        limiter = asyncio.Semaphore(8)
+
+        async def describe(room: str) -> dict[str, Any]:
+            entry: dict[str, Any] = {"room": room, "name": rooms[room]["name"],
+                                     "joined": room in self._joined_rooms,
+                                     "nick": self._joined_rooms.get(room)}
+            async with limiter:
+                try:
+                    entry.update(await self._room_info(room))
+                except XMPPError as exc:
+                    entry["error"] = str(exc)
+            return entry
+
+        return {
+            "services": services,
+            "count": len(rooms),
+            "truncated": len(rooms) > limit,
+            "rooms": list(await asyncio.gather(*(describe(r) for r in listed))),
+        }
+
+    async def _room_info(self, room: str) -> dict[str, Any]:
+        """Name, description, occupant count and flags from a room's disco#info."""
+        try:
+            iq = await self.xmpp.plugin["xep_0030"].get_info(jid=room, cached=False)
+        except (IqError, IqTimeout) as exc:
+            raise XMPPError(f"disco#info failed for {room}: {exc}") from exc
+        info = iq["disco_info"]
+        features = set(info["features"])
+        out: dict[str, Any] = {
+            "public": "muc_public" in features,
+            "members_only": "muc_membersonly" in features,
+            "password_protected": "muc_passwordprotected" in features,
+            "anonymous": "muc_nonanonymous" not in features,
+            "persistent": "muc_persistent" in features,
+        }
+        names = [n for (c, t, _l, n) in info["identities"] if c == "conference" and n]
+        if names:
+            out["name"] = names[0]
+        form = info.xml.find("{jabber:x:data}x")
+        if form is not None:
+            fields = {f.get("var"): (f.findtext("{jabber:x:data}value") or "")
+                      for f in form.findall("{jabber:x:data}field")}
+            if fields.get("muc#roominfo_description"):
+                out["description"] = fields["muc#roominfo_description"]
+            if fields.get("muc#roominfo_occupants", "").isdigit():
+                out["occupants"] = int(fields["muc#roominfo_occupants"])
+            if fields.get("muc#roominfo_subject"):
+                out["subject"] = fields["muc#roominfo_subject"]
+        return out
+
+    async def room_members(self, room: str) -> dict[str, Any]:
+        """Who is in a room — joined or not.
+
+        Joined: every occupant with role, affiliation, real JID where the room
+        discloses it, and the friendly name / agent ID / presence it
+        advertises. Not joined: the nicks disco#items reveals (XEP-0045 §6.5),
+        which a room may decline to share.
+        """
+        room = room_key(room)
+        if room in self._joined_rooms:
+            return {"room": room, "joined": True, "occupants": self.room_occupants(room)}
+        try:
+            items = await self.disco_items(room)
+        except XMPPError as exc:
+            raise XMPPError(
+                f"{room} does not list its occupants to non-members ({exc}); "
+                "join_room to see them"
+            ) from exc
+        occupants = [{"nick": JID(i["jid"]).resource or i["name"]} for i in items]
+        return {"room": room, "joined": False, "occupants": occupants}
 
     # --- agent directory ------------------------------------------------------
 

@@ -218,3 +218,36 @@ async def test_busy_and_idle_show_as_presence(spawn_agent, ejabberd: EjabberdHan
             return peer and (peer["presence"], peer["status"]) == expected
 
         await _until(seen)
+
+
+async def test_list_rooms_and_members(spawn_agent, ejabberd: EjabberdHandle) -> None:
+    room = _directory(ejabberd)
+    rev = await spawn_agent("rev", "--join", room, claude_name="Reviewer")
+    bld = await spawn_agent("bld", claude_name="Builder")  # not in the room
+
+    async def listed():
+        rooms = {r["room"]: r for r in (await bld.call("list_rooms"))["rooms"]}
+        return rooms.get(room)
+
+    entry = await _until(listed)
+    assert entry["joined"] is False and entry["occupants"] == 1
+    assert entry["public"] is True and entry["anonymous"] is False
+
+    # Members of a room we have not joined: nicks only, if the room shares them.
+    outside = await bld.call("list_room_occupants", {"room_jid": room})
+    assert (outside["joined"], outside["occupants"]) == (False, [{"nick": "Reviewer"}])
+
+    # Join it: now full detail, including the peer's friendly name and agent ID.
+    await bld.call("join_room", {"room_jid": room})
+    inside = await bld.call("list_room_occupants", {"room_jid": room})
+    by_nick = {o["nick"]: o for o in inside["occupants"]}
+    assert by_nick["Builder"]["me"] is True
+    assert by_nick["Reviewer"]["jid"].startswith(rev.jid + "/")
+    assert (by_nick["Reviewer"]["name"], by_nick["Reviewer"]["agent_id"]) == (
+        "Reviewer", rev.jid.split(".")[0])
+    rooms = {r["room"]: r for r in (await bld.call("list_rooms"))["rooms"]}
+    assert rooms[room]["joined"] is True and rooms[room]["nick"] == "Builder"
+
+    await bld.call("leave_room", {"room_jid": room})
+    after = {r["room"]: r for r in (await bld.call("list_rooms"))["rooms"]}
+    assert after[room]["joined"] is False

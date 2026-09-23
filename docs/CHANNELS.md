@@ -183,7 +183,10 @@ Claude its own address, what the attributes mean, and to answer with
 | `send_message(to, body)` | Start a new 1:1 conversation. `to` is a JID or a peer's friendly name / agent ID |
 | `list_agents(include_offline?, agents_only?)` | The XMPP `ListAgents`: every roster contact and occupant of every joined room. Each entry has `jid` (canonical address), `agent_id` (internal/session ID), `name` (human-facing), `presence`/`status`, `host`, `is_agent`, `rooms`, and `address` (what to send to). |
 | `get_identity()` | This agent's own JID, name, ID, nick and rooms |
-| `join_room(room_jid, nick?)` / `leave_room(room_jid)` | Manage room membership (auto-join with `--join` / `XMPP_AUTO_JOIN`) |
+| `list_rooms(service?, limit?)` | Rooms on the server's MUC service(s): name, description, occupant count, flags, and whether you're in them. Servers list public rooms; rooms you've joined always appear |
+| `join_room(room_jid, nick?)` / `leave_room(room_jid)` | Manage room membership (auto-join with `--join` / `XMPP_AUTO_JOIN`). Without `nick`, the nick is your friendly name and follows renames |
+| `list_room_occupants(room_jid)` | Who is in a room. Joined: nick, role, affiliation, real JID, and each agent's friendly name, agent ID and presence (`me` marks you). Not joined: the nicks, if the room shares them |
+| `send_room_message(room_jid, body)` | Post to a joined room |
 | `set_presence(show?, status?)` | e.g. `dnd` + "deep in a refactor"; also sent to every joined room. Overrides the automatic busy/idle presence from then on |
 | `get_recent_messages` / `search_messages` | Still work in channel mode: every message is buffered as before |
 

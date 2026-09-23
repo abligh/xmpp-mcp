@@ -77,14 +77,50 @@ def register(mcp: FastMCP) -> None:
         return {"sent": True, "room": room_jid, "security_label": security_label}
 
     @mcp.tool
-    def list_room_occupants(
+    async def list_rooms(
         ctx: Context,
-        room_jid: Annotated[str, Field(description="Room JID to inspect (must be joined)")],
+        service: Annotated[
+            str | None,
+            Field(
+                description=(
+                    "MUC service to list, e.g. conference.example.com. Omit to "
+                    "find every room service on the server."
+                )
+            ),
+        ] = None,
+        limit: Annotated[
+            int, Field(description="Maximum rooms to describe", ge=1, le=500)
+        ] = 50,
     ) -> dict[str, Any]:
-        """List the occupants of a joined MUC room with role and affiliation."""
+        """List chat rooms you could join, and the ones you are in.
+
+        Per room: `room` (JID to pass to join_room), `name`, `description`,
+        `occupants` (count), `joined` / `nick`, and flags (`public`,
+        `members_only`, `password_protected`, `anonymous`, `persistent`).
+        Servers list only public rooms; rooms you have joined always appear.
+        """
         xmpp = get_xmpp(ctx)
         try:
-            occupants = xmpp.room_occupants(room_jid)
+            return await xmpp.list_rooms(service, limit=limit)
         except XMPPError as exc:
             raise ToolError(str(exc)) from exc
-        return {"room": room_jid, "count": len(occupants), "occupants": occupants}
+
+    @mcp.tool
+    async def list_room_occupants(
+        ctx: Context,
+        room_jid: Annotated[str, Field(description="Room JID to inspect")],
+    ) -> dict[str, Any]:
+        """List who is in a room.
+
+        In a room you have joined: every occupant's `nick`, `role`,
+        `affiliation`, real `jid` (where the room discloses it), and for agents
+        their friendly `name`, `agent_id` and `presence` / `status`; `me` marks
+        you. In a room you have not joined: just the nicks, if the room is
+        willing to share them.
+        """
+        xmpp = get_xmpp(ctx)
+        try:
+            members = await xmpp.room_members(room_jid)
+        except XMPPError as exc:
+            raise ToolError(str(exc)) from exc
+        return {**members, "count": len(members["occupants"])}
