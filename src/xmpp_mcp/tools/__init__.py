@@ -17,6 +17,7 @@ from ..xmpp_client import XMPPClient
 CTX_XMPP = "xmpp"
 CTX_SETTINGS = "settings"
 CTX_OPENFIRE = "openfire"
+CTX_CHANNEL = "channel"  # ChannelBridge in channel mode, else None
 
 
 def get_xmpp(ctx: Context) -> XMPPClient:

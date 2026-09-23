@@ -118,10 +118,35 @@ def test_display_name_precedence() -> None:
     )
 
 
+def test_channel_off_by_default() -> None:
+    assert _settings().xmpp_channel is False
+
+
+def test_channel_allow_defaults_to_own_domain() -> None:
+    assert _settings().channel_allow_patterns == ["*@example.com"]
+
+
+def test_channel_allow_is_split() -> None:
+    s = _settings(xmpp_channel_allow=" alice@example.com, *@partner.org ,,alice@example.com")
+    assert s.channel_allow_patterns == ["alice@example.com", "*@partner.org"]
+
+
 def test_auto_join_rooms_split() -> None:
     s = _settings(xmpp_auto_join="agents@conf.example.com, ops@conf.example.com")
     assert s.auto_join_rooms == ["agents@conf.example.com", "ops@conf.example.com"]
     assert _settings().auto_join_rooms == []
+
+
+def test_load_settings_overrides_win_and_ignore_none(monkeypatch: pytest.MonkeyPatch) -> None:
+    from xmpp_mcp.config import load_settings
+
+    monkeypatch.setenv("XMPP_JID", "env@example.com")
+    monkeypatch.setenv("XMPP_PASSWORD", "pw")
+    monkeypatch.setenv("XMPP_CHANNEL", "true")
+    monkeypatch.chdir("/")  # keep any developer .env out of it
+    s = load_settings(xmpp_jid="cli@example.com", xmpp_channel=None)
+    assert s.xmpp_jid == "cli@example.com"
+    assert s.xmpp_channel is True  # None override must not mask the env var
 
 
 def test_nick_explicitness_survives_defaulting(monkeypatch: pytest.MonkeyPatch) -> None:

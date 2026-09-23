@@ -23,9 +23,10 @@ class Settings(BaseSettings):
     The OPENFIRE_* group is optional and only enables the Openfire REST admin
     tools. When unset, those tools fail with a clear message.
 
-    The agent group turns one server instance into one addressable *agent*
-    on a shared XMPP network, with a per-session JID (``XMPP_JID`` may be a
-    template — see :mod:`xmpp_mcp.identity`).
+    The agent / channel group turns one server instance into one addressable
+    *agent* on a shared XMPP network: a per-session JID (``XMPP_JID`` may be a
+    template, see :mod:`xmpp_mcp.identity`) and, with ``XMPP_CHANNEL``, push
+    delivery of inbound messages into Claude Code via the channels API.
     """
 
     model_config = SettingsConfigDict(
@@ -120,6 +121,23 @@ class Settings(BaseSettings):
         description=(
             "Host name used for {host} and advertised to peers. Defaults to the "
             "short hostname — override it when container hostnames are random"
+        ),
+    )
+
+    # --- Claude Code channel --------------------------------------------------
+    xmpp_channel: bool = Field(
+        False,
+        description=(
+            "Declare the claude/channel capability and push every inbound "
+            "message to Claude Code as a notifications/claude/channel event"
+        ),
+    )
+    xmpp_channel_allow: str | None = Field(
+        None,
+        description=(
+            "Comma-separated sender patterns allowed through the channel "
+            "(fnmatch-style: alice@example.com, *@example.com, "
+            "room@conference.example.com/*, *). Defaults to *@<own domain>"
         ),
     )
 
@@ -221,6 +239,12 @@ class Settings(BaseSettings):
     def auto_join_rooms(self) -> list[str]:
         """Rooms from ``XMPP_AUTO_JOIN`` as a de-duplicated list."""
         return _split_csv(self.xmpp_auto_join)
+
+    @property
+    def channel_allow_patterns(self) -> list[str]:
+        """Sender allowlist for the channel; defaults to every account on our own domain."""
+        patterns = _split_csv(self.xmpp_channel_allow)
+        return patterns or [f"*@{JID(self.xmpp_jid).domain}"]
 
     @property
     def openfire_enabled(self) -> bool:

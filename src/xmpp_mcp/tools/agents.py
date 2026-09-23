@@ -129,5 +129,6 @@ def register(mcp: FastMCP) -> None:
             "claude_session_found_via": session.how if session else None,
             "host": s.agent_host,
             "nick": s.xmpp_nick,
+            "channel": s.xmpp_channel,
             "rooms": [{"room": r, "nick": xmpp.nick_in(r)} for r in xmpp.joined_rooms],
         }

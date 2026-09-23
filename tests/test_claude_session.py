@@ -284,6 +284,20 @@ async def test_ambiguous_names_are_refused(monkeypatch: pytest.MonkeyPatch) -> N
     assert c.resolve_address("Reviewer (host2)") == "b@xmpp.test"  # the nick is unique
 
 
+async def test_inbound_messages_carry_the_senders_friendly_name(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    c = _client()
+    _in_room(c, monkeypatch, {"Reviewer": "sess-r@xmpp.test/x"})
+    _peer(c, f"{ROOM}/Reviewer", "Reviewer", "sess-r", real="sess-r@xmpp.test/x")
+    got: list[dict[str, Any]] = []
+    c.add_message_listener(got.append)
+    # A direct message from the same agent: known to us only through the room.
+    c._on_message(c.xmpp.make_message(mto="bot@xmpp.test", mbody="hi", mtype="chat",
+                                      mfrom="sess-r@xmpp.test/x"))
+    assert got[0]["sender_name"] == "Reviewer"
+
+
 async def test_a_taken_nick_falls_back(monkeypatch: pytest.MonkeyPatch) -> None:
     """Two sessions may share a friendly name; the second still gets into the room."""
     c = _client(xmpp_agent_name="Reviewer", xmpp_agent_host="host2")

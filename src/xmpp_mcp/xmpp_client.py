@@ -3,8 +3,9 @@
 Owns a single ``ClientXMPP`` connection for the life of the MCP server. The
 connection is opened in the FastMCP lifespan and shared with every tool via the
 lifespan context. Inbound messages are always buffered in a bounded deque so
-tools can pull them (``get_recent_messages`` / ``search_messages``) — the
-MCP model is request/response, so tools pull and the server does not push.
+tools can pull them (``get_recent_messages`` / ``search_messages``); in
+channel mode they are *additionally* handed to message listeners (see
+:meth:`XMPPClient.add_message_listener`), which push them to Claude Code.
 
 The connection is kept alive for the life of the server: an unexpected
 disconnect schedules a reconnect with capped backoff, and every new session
@@ -17,6 +18,7 @@ import asyncio
 import logging
 import ssl
 from collections import deque
+from collections.abc import Callable
 from datetime import datetime, timezone
 from typing import Any
 
@@ -36,6 +38,8 @@ logger = logging.getLogger("xmpp_mcp.xmpp")
 class XMPPError(RuntimeError):
     """Raised when an XMPP operation fails in a way worth surfacing to the caller."""
 
+
+MessageListener = Callable[[dict[str, Any]], None]
 
 # Backoff (seconds) before re-dialling after an established stream drops:
 # quick first retry, then doubling to the cap. Note this governs *our*
@@ -118,6 +122,8 @@ class XMPPClient:
         self._seen_pubsub_msg_ids: deque[str] = deque(maxlen=200)
         # The last pubsub event stanza handled (see _on_pubsub_items).
         self._last_pubsub_xml: Any = None
+        # Channel-mode consumers of inbound messages (see add_message_listener).
+        self._listeners: list[MessageListener] = []
         # Last available presence per full JID — powers list_agents.
         self.presence = PresenceCache()
         # Bare JIDs actually on the server-side roster. slixmpp's client_roster
@@ -515,6 +521,17 @@ class XMPPClient:
         if not self._ready.done():
             self._ready.set_exception(XMPPError(f"Connection failed: {reason}"))
 
+    def add_message_listener(self, listener: MessageListener) -> None:
+        """Call ``listener(record)`` for each *live* inbound message from a peer.
+
+        ``record`` has the same shape as an inbox entry. Listeners run inside
+        the slixmpp event handler, so they must be quick and non-blocking.
+        They are not called for this client's own MUC messages reflected back
+        by the room (XEP-0045 §7.4), nor for room history replayed with a
+        XEP-0203 delay stamp — only for things a peer is saying now.
+        """
+        self._listeners.append(listener)
+
     def _real_jid(self, occupant: JID) -> str | None:
         """Real bare JID of a MUC occupant, when the room discloses it."""
         muc = self.xmpp.plugin["xep_0045"]
@@ -528,24 +545,70 @@ class XMPPClient:
         return cached["real_jid"] if cached else None
 
     def _on_message(self, msg: Any) -> None:
-        # Direct chat/normal stanzas and groupchat stanzas both land here.
-        if msg["type"] in ("chat", "normal", "groupchat") and msg["body"]:
-            is_muc = msg["type"] == "groupchat"
-            self._inbox.append(
-                {
-                    "from": msg["from"].full,
-                    "to": msg["to"].full,
-                    "type": msg["type"],
-                    "body": msg["body"],
-                    "security_label": _read_displaymarking(msg),
-                    "timestamp": _now_iso(),
-                    # For groupchat the JID splits into room (.bare) and the
-                    # speaker's MUC nick (.resource). For 1:1 these stay None
-                    # so tools/search treat them uniformly.
-                    "room": msg["from"].bare if is_muc else None,
-                    "nick": msg["from"].resource if is_muc else None,
-                }
-            )
+        # Direct chat/normal/headline stanzas and groupchat stanzas all land here.
+        if msg["type"] not in ("chat", "normal", "headline", "groupchat") or not msg["body"]:
+            return
+        sender: JID = msg["from"]
+        is_muc = msg["type"] == "groupchat"
+        # Private messages from a room occupant (XEP-0045 §7.5) come from
+        # room@service/nick too — the bare part is the room, not a person.
+        from_room = sender.bare in self._joined_rooms
+        record = {
+            "from": sender.full,
+            "to": msg["to"].full,
+            "type": msg["type"],
+            "body": msg["body"],
+            "security_label": _read_displaymarking(msg),
+            "timestamp": _now_iso(),
+            # For groupchat the JID splits into room (.bare) and the
+            # speaker's MUC nick (.resource). For 1:1 these stay None
+            # so tools/search treat them uniformly.
+            "room": sender.bare if is_muc else None,
+            "nick": sender.resource if is_muc else None,
+            # Who actually sent it: the (server-stamped) bare JID for a 1:1
+            # message, the occupant's real JID when a room discloses it,
+            # None for an occupant of an anonymous room.
+            # For anything from a room the real JID is either disclosed by the
+            # room or unknown — never the room's own bare JID, which would let
+            # a room-wide pattern act as a per-sender allowlist.
+            "sender_jid": self._real_jid(sender) if (is_muc or from_room) else sender.bare,
+            # Occupant JID (room@service/nick) for room traffic, else None.
+            # The channel gate needs to tell "a nick in a room" apart from an
+            # account's resource: both live in the resourcepart, and both are
+            # chosen by the peer.
+            "occupant": sender.full if (is_muc or from_room) else None,
+            # The sender's friendly name, when it advertises one — so a
+            # canonical session-ID address arrives with something readable.
+            "sender_name": None,
+            "thread": msg["thread"] or None,
+        }
+        real = record["sender_jid"]
+        if real:
+            record["sender_name"] = self.friendly_name_of(real)
+        elif record["occupant"]:
+            cached = self.presence.get(record["occupant"])
+            agent = cached.get("agent") if cached else None
+            record["sender_name"] = (agent or {}).get("name") or None
+        self._inbox.append(record)
+
+        if not self._listeners:
+            return
+        if is_muc and not from_room:
+            # A room we are not in: a straggler delivered around a leave, or
+            # traffic arriving before a join completes. It stays in the pull
+            # buffer, but an agent should not act on a room it is not in.
+            return
+        if is_muc and sender.resource == self._joined_rooms.get(sender.bare):
+            return  # our own message reflected by the room
+        if not is_muc and sender == self.xmpp.boundjid:
+            return  # a message to ourselves
+        if is_muc and msg.xml.find(f"{{{_DELAY_NS}}}delay") is not None:
+            return  # room history, not live traffic
+        for listener in self._listeners:
+            try:
+                listener(dict(record))
+            except Exception:  # noqa: BLE001 - never break the XML stream
+                logger.exception("Message listener failed")
 
     # --- messaging ------------------------------------------------------------
 

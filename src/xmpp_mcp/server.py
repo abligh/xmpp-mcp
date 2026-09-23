@@ -2,6 +2,10 @@
 
 Builds the FastMCP app, manages the XMPP connection lifecycle in the server
 lifespan, and registers every tool/resource module.
+
+With channel mode on (``--channel`` / ``XMPP_CHANNEL=true``) the app also
+declares the ``claude/channel`` capability and pushes inbound messages to
+Claude Code — see :mod:`xmpp_mcp.channel`.
 """
 
 from __future__ import annotations
@@ -16,10 +20,14 @@ from typing import Any
 
 from fastmcp import FastMCP
 
+from .channel import (
+    CHANNEL_CAPABILITY, ChannelBridge, ChannelSessionMiddleware, SenderGate,
+    channel_instructions,
+)
 from .config import Settings, load_settings
 from .openfire_admin import OpenfireAdmin
 from .tools import (
-CTX_OPENFIRE, CTX_SETTINGS, CTX_XMPP,
+    CTX_CHANNEL, CTX_OPENFIRE, CTX_SETTINGS, CTX_XMPP,
     admin, agents, disco, mam, messaging, muc, presence, pubsub,
 )
 from .xmpp_client import XMPPClient
@@ -41,6 +49,20 @@ def _make_lifespan(
     async def _lifespan(server: FastMCP) -> AsyncIterator[dict[str, Any]]:
         """Open the XMPP connection (and optional Openfire client) for the server's life."""
         xmpp = XMPPClient(settings)
+        bridge: ChannelBridge | None = None
+        if settings.xmpp_channel:
+            # Register the listener before connecting so nothing that arrives
+            # during login (e.g. offline messages) is missed; it waits in the
+            # bridge queue until the MCP client has initialised.
+            bridge = ChannelBridge(
+                SenderGate(settings.channel_allow_patterns),
+                max_pending=settings.xmpp_inbox_size,
+            )
+            xmpp.add_message_listener(bridge.submit)
+            logger.info(
+                "Channel mode on — pushing messages from %s",
+                ", ".join(bridge.gate.patterns),
+            )
         await xmpp.start()
 
         openfire = OpenfireAdmin(settings) if settings.openfire_enabled else None
@@ -52,8 +74,11 @@ def _make_lifespan(
                 CTX_XMPP: xmpp,
                 CTX_SETTINGS: settings,
                 CTX_OPENFIRE: openfire,
+                CTX_CHANNEL: bridge,
             }
         finally:
+            if bridge is not None:
+                await bridge.aclose()
             await xmpp.stop()
             if openfire is not None:
                 await openfire.aclose()
@@ -70,11 +95,24 @@ def create_server(**overrides: Any) -> FastMCP:
     ``claude/channel`` capability and channel-specific instructions.
     """
     settings = load_settings(**overrides)
+    instructions = _BASE_INSTRUCTIONS
+    experimental: dict[str, dict[str, Any]] = {}
+    if settings.xmpp_channel:
+        experimental[CHANNEL_CAPABILITY] = {}
+        instructions = (
+            channel_instructions(settings.xmpp_jid, settings.display_name)
+            + "\n\n" + _BASE_INSTRUCTIONS
+        )
+
     mcp: FastMCP = FastMCP(
         "xmpp-mcp",
-        instructions=_BASE_INSTRUCTIONS,
+        instructions=instructions,
         lifespan=_make_lifespan(settings),
+        experimental_capabilities=experimental or None,
     )
+    if settings.xmpp_channel:
+        mcp.add_middleware(ChannelSessionMiddleware(CTX_CHANNEL))
+
     messaging.register(mcp)
     agents.register(mcp)
     presence.register(mcp)
@@ -96,6 +134,11 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--channel", action="store_true", default=None,
+        help="push inbound messages to Claude Code via the claude/channel "
+             "capability (XMPP_CHANNEL)",
+    )
+    parser.add_argument(
         "--agent-name", metavar="NAME",
         help="this agent's name; fills {agent} in the JID template (XMPP_AGENT_NAME)",
     )
@@ -106,6 +149,10 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
     parser.add_argument(
         "--join", metavar="ROOM", action="append",
         help="MUC room to join at startup; repeatable (XMPP_AUTO_JOIN)",
+    )
+    parser.add_argument(
+        "--allow", metavar="PATTERN", action="append",
+        help="sender pattern allowed through the channel; repeatable (XMPP_CHANNEL_ALLOW)",
     )
     parser.add_argument(
         "--register", action="store_true", default=None,
@@ -135,13 +182,25 @@ def main(argv: Sequence[str] | None = None) -> None:
     )
 
     server = create_server(  # noqa: F841 - assigned below for clarity
+        xmpp_channel=args.channel,
         xmpp_agent_name=args.agent_name,
         xmpp_jid=args.jid,
         xmpp_auto_join=",".join(args.join) if args.join else None,
+        xmpp_channel_allow=",".join(args.allow) if args.allow else None,
         xmpp_register=args.register,
     )
     try:
         if transport == "http":
+            if os.environ.get("XMPP_CHANNEL", "").lower() in ("1", "true", "yes") or args.channel:
+                # Channel pushes ride the connection's standalone notification
+                # channel, which only exists once a client has completed the
+                # initialize handshake. FastMCP's HTTP transport answers a
+                # modern client without one, so nothing would ever be
+                # delivered. Claude Code spawns MCP servers over stdio.
+                logger.warning(
+                    "Channel mode is only delivered over the stdio transport; "
+                    "inbound messages will queue and be dropped under HTTP"
+                )
             host = os.environ.get("XMPP_MCP_HTTP_HOST", "127.0.0.1")
             port = int(os.environ.get("XMPP_MCP_HTTP_PORT", "8765"))
             logger.info("Running MCP server on http://%s:%s/mcp", host, port)
