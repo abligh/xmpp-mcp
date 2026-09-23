@@ -84,3 +84,52 @@ async def test_record_adds_timestamp() -> None:
     c._record_event({"kind": "publish", "service": "s", "node": "n"})
     got = c.drain_pubsub_events()
     assert "timestamp" in got[0]
+
+
+# --- the handler must not rewind slixmpp's own dispatch loop -----------------
+
+
+def _event(c: XMPPClient, with_id: bool, items: int = 1):
+    from slixmpp import Message
+    from slixmpp.xmlstream import ET
+
+    body = "".join(
+        f'<item id="i{n}"><nick xmlns="http://jabber.org/protocol/nick">n{n}</nick></item>'
+        for n in range(items)
+    )
+    id_attr = ' id="m1"' if with_id else ""
+    raw = (
+        f'<message xmlns="jabber:client" from="bot@xmpp.test" to="bot@xmpp.test/r"{id_attr}>'
+        '<event xmlns="http://jabber.org/protocol/pubsub#event">'
+        f'<items node="http://jabber.org/protocol/nick">{body}</items></event></message>'
+    )
+    return Message(c.xmpp, ET.fromstring(raw))
+
+
+@pytest.mark.parametrize("with_id", [True, False])
+@pytest.mark.parametrize("items", [1, 3])
+async def test_notification_dispatch_terminates(with_id: bool, items: int) -> None:
+    """Regression: an id-less notification once hung the event loop for ever.
+
+    slixmpp stanzas are their own iterators. xep_0060 loops over the items
+    and fires our handler synchronously for each; if the handler iterates the
+    same stanza it rewinds that loop. Openfire's notifications carry an id,
+    which let a dedupe paper over it; ejabberd's PEP notifications do not.
+    """
+    c = XMPPClient(_settings())
+    fires = 0
+    handler = c._on_pubsub_items
+
+    def counting(msg):
+        nonlocal fires
+        fires += 1
+        if fires > 50:
+            raise AssertionError("dispatch loop is not terminating")
+        handler(msg)
+
+    c.xmpp.del_event_handler("pubsub_publish", handler)
+    c.xmpp.add_event_handler("pubsub_publish", counting)
+    c.xmpp.plugin["xep_0060"]._handle_event_items(_event(c, with_id, items))
+    assert fires == items  # one fire per item, as slixmpp intends
+    got = c.drain_pubsub_events()
+    assert [e["item_id"] for e in got] == [f"i{n}" for n in range(items)]  # each once

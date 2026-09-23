@@ -84,6 +84,8 @@ class XMPPClient:
             maxlen=settings.xmpp_inbox_size
         )
         self._seen_pubsub_msg_ids: deque[str] = deque(maxlen=200)
+        # The last pubsub event stanza handled (see _on_pubsub_items).
+        self._last_pubsub_xml: Any = None
 
         # XEPs every tool surface depends on. xep_0258 (security labels) is
         # registered separately in start() because it is our own plugin.
@@ -450,8 +452,21 @@ class XMPPClient:
         """Capture ``pubsub_publish`` / ``pubsub_retract`` notifications.
 
         slixmpp fires the event once per item, with the *full* msg attached on
-        every fire — so we dedupe by msg id and process all items in one pass.
+        every fire — so we process all items on the first fire and skip the
+        rest. Two traps here, both of which once hung the event loop:
+
+        * **Never iterate the stanza itself.** A slixmpp stanza is its own
+          iterator: ``for item in stanza`` resets an index stored *on the
+          stanza*. xep_0060 is itself looping over these items when it fires
+          this (synchronous) handler, so iterating them here rewinds its loop,
+          and it fires us again — for ever. Take ``.iterables``, a plain list.
+        * **Don't dedupe on the message id alone.** RFC 6120 makes ``id``
+          optional and ejabberd omits it on PEP notifications, so the repeat
+          fires are recognised by the stanza object instead.
         """
+        if msg.xml is self._last_pubsub_xml:
+            return  # a repeat fire for a stanza already processed
+        self._last_pubsub_xml = msg.xml
         msg_id = msg["id"] or ""
         if msg_id and msg_id in self._seen_pubsub_msg_ids:
             return
@@ -470,7 +485,7 @@ class XMPPClient:
 
         from xml.etree import ElementTree as etree
 
-        for item in msg["pubsub_event"]["items"]:
+        for item in list(msg["pubsub_event"]["items"].iterables):
             if item.name == "item":
                 kind = "publish"
                 payload = item["payload"]
