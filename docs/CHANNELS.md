@@ -46,9 +46,13 @@ It replaces local-socket peer messaging (`ListAgents` / `SendMessage` over
 python -m venv .venv
 .venv/bin/python -m pip install -e ".[dev]"
 
-# 2. Lab XMPP server: ejabberd with open in-band registration and a shared
-#    "agents" room. Registers alice/bob/carol/webhook.
+# 2. Lab XMPP server — one of:
+#    ejabberd: open in-band registration, one shared agent password, plain text.
 python start-lab-ejabberd.py
+#    Prosody (port 5322): the production shape — per-host derived credentials,
+#    TLS verified, humans and agents on separate virtual hosts. See
+#    "Authentication: one secret per host" below.
+python start-lab-prosody.py
 
 # 3. The webhook relay (optional, one per host)
 WEBHOOK_XMPP_JID=webhook@xmpp.test WEBHOOK_XMPP_PASSWORD=webhookpw \
@@ -532,7 +536,9 @@ window.
 
 | Variable | Default | |
 |---|---|---|
-| `WEBHOOK_XMPP_JID` / `WEBHOOK_XMPP_PASSWORD` | required | Relay account |
+| `WEBHOOK_XMPP_JID` | required | Relay account, e.g. `webhook.host1@agents.example.com` |
+| `WEBHOOK_XMPP_PASSWORD` / `WEBHOOK_XMPP_HOST_KEY_FILE` | one required | Password, or the host key to derive one from |
+| `WEBHOOK_XMPP_CA_FILE` | — | CA bundle for a private CA |
 | `WEBHOOK_XMPP_HOST` / `WEBHOOK_XMPP_PORT` | JID domain / 5222 | |
 | `WEBHOOK_XMPP_TLS_INSECURE` | `false` | Lab only |
 | `WEBHOOK_XMPP_NICK` | `webhook` | Nick in rooms |
@@ -552,6 +558,93 @@ window.
 | `WEBHOOK_ALLOWED_TARGETS` | — | fnmatch patterns limiting which JIDs may be addressed |
 | `WEBHOOK_DEDUPE_SIZE` | `512` | Recent delivery IDs remembered; repeats are dropped |
 
+## Authentication: one secret per host
+
+Every agent on a host can read every other agent's files, so a password per
+agent adds nothing *within* a host — the host is the trust boundary. The
+recommended setup therefore gives each **host** one secret, while every
+**session** still gets its own identity and its own password, derived on
+demand. The server holds a single master key and stores no agent accounts.
+
+```
+master   = 32 random bytes                       # on the XMPP server only
+host_key = HMAC-SHA256(master,   "xmpp-mcp host v1|"  + host)          # one per host
+password = "xmc1." + expiry + "." +
+           base64url(HMAC-SHA256(host_key, "xmpp-mcp agent v1|" + bare_jid + "|" + expiry))
+```
+
+for an agent JID `<session>.<host>@<agents domain>`. The server takes `host`
+from the JID it is checking, derives that host's key and recomputes the MAC,
+so:
+
+* **host1's key can only mint host1's JIDs** — it cannot impersonate host2;
+* the MAC covers the **whole JID**, so a password is useless for any other
+  account or domain;
+* each password **expires** (`XMPP_CREDENTIAL_TTL`, default 24 h; the server
+  refuses more than 7 days), and agents mint a fresh one on every connect —
+  a password leaked from a log or a process listing soon stops working;
+* the secret itself never crosses the wire, and there is nothing to
+  provision per agent: a new session simply logs in.
+
+Revoking a host: add it to `xmpp_mcp_revoked_hosts` on the server, and give
+the rebuilt machine a new host name (hence a new key). Rotating the master
+key re-keys every host at once.
+
+The login is SASL PLAIN (the password has to reach the server to be
+checked), so **TLS is mandatory** — the Prosody lab refuses logins without
+it, and verifies the server's certificate against `XMPP_CA_FILE`.
+
+**Humans** keep ordinary accounts on a separate virtual host of the same
+server. Agents and humans share rooms and message each other directly:
+
+| Virtual host | Who | Authentication |
+|---|---|---|
+| `example.com` | people, any XMPP client | ordinary passwords (SCRAM) |
+| `agents.example.com` | `<session>.<host>@agents.example.com` | derived credentials only; no accounts, no registration |
+
+With agents and humans on different domains, widen the sender gate:
+`XMPP_CHANNEL_ALLOW=*@agents.example.com,*@example.com`. `list_rooms` finds
+a room service hanging off the parent domain (`conference.example.com`) by
+itself; `XMPP_MUC_SERVICE` names one explicitly.
+
+### Setting it up
+
+```bash
+# On the XMPP server, once:
+xmpp-mcp-keys new-master -o /etc/prosody/xmpp-mcp-master.key      # then chown prosody, 0600
+
+# For each agent host (run where the master key is; ship the result to the host):
+xmpp-mcp-keys host-key --master /etc/prosody/xmpp-mcp-master.key --host host1 -o host1.key
+```
+
+On the host, in the agents' `.mcp.json` env (or `~/.claude.json`):
+
+```json
+"XMPP_JID": "{session}.{host}@agents.example.com",
+"XMPP_AGENT_HOST": "host1",
+"XMPP_HOST_KEY_FILE": "/etc/xmpp-mcp/host1.key",
+"XMPP_CHANNEL_ALLOW": "*@agents.example.com,*@example.com"
+```
+
+The host key file must be mode 0600, readable by the user the agents run as
+(xmpp-mcp warns otherwise). The webhook relay on the same host uses the same
+key: `WEBHOOK_XMPP_JID=webhook.host1@agents.example.com`,
+`WEBHOOK_XMPP_HOST_KEY_FILE=/etc/xmpp-mcp/host1.key`.
+
+**Server side.** Prosody: copy `tests/integration/docker/prosody/modules/mod_auth_xmpp_mcp.lua`
+into a plugin directory and configure the agents host as in the lab's
+`prosody.cfg.lua` (`authentication = "xmpp_mcp"`,
+`xmpp_mcp_master_key_file`, optionally `xmpp_mcp_revoked_hosts`). The check
+runs inside Prosody — no helper process. ejabberd would need the same check
+as an external-auth script (not built yet).
+
+**The Prosody lab** (`python start-lab-prosody.py`, port 5322) is this setup
+end to end: a throwaway CA and verified TLS, humans on `xmpp.test`, agents
+on `agents.xmpp.test`, keys for three simulated hosts (one of them revoked).
+The whole agent suite runs against it (`pytest -m agents --xmpp-lab prosody`),
+plus tests that attack the server directly with forged, expired, over-long,
+cross-host, revoked and plaintext credentials.
+
 ## Configuration reference (agent side)
 
 | Variable | Flag | Default | |
@@ -561,6 +654,11 @@ window.
 | `XMPP_AGENT_NAME` | `--agent-name` | — | Fills `{agent}`; the friendly name when there's no Claude session |
 | `XMPP_AGENT_ID` | | the session ID | Internal ID advertised to peers; fills `{session}` outside Claude Code |
 | `XMPP_DISPLAY_NAME` | | the session's name | Pins the friendly name (otherwise it follows the session) |
+| `XMPP_PASSWORD` | | — | Account password; not needed with a host key |
+| `XMPP_HOST_KEY_FILE` | | — | Host key: derive this agent's password per connect instead |
+| `XMPP_CREDENTIAL_TTL` | | `86400` | Lifetime of each derived password (seconds) |
+| `XMPP_CA_FILE` | | — | CA bundle for a private CA (verification stays on) |
+| `XMPP_MUC_SERVICE` | | discovered | Room service for `list_rooms` |
 | `XMPP_CLAUDE_SESSION` | | `auto` | `auto`, `off`, or a path to the Claude Code session file |
 | `XMPP_CLAUDE_SESSION_POLL` | | `10` | Seconds between checks for a rename |
 | `XMPP_AGENT_HOST` | | short hostname | Fills `{host}`; advertised to peers |
@@ -600,11 +698,18 @@ Flags win over the environment, which wins over `.env`.
   `review@api` all become `review-api`, and a name with no ASCII cannot
   produce a JID at all. Two agents that normalise alike would share one
   account; give them distinct ASCII names or put `{host}` in the template.
-* **Transport security and agent authentication.** The lab runs plain-text
-  c2s with a shared agent password. For production: STARTTLS with real
-  certificates (`XMPP_TLS_INSECURE=false`), per-agent credentials (or SASL
-  EXTERNAL with client certificates), registration closed, and the relay
-  behind `WEBHOOK_TOKEN` / `WEBHOOK_GITHUB_SECRET`.
+* **Real certificates.** The Prosody lab verifies TLS against its own CA;
+  a public deployment needs certificates from a public CA (e.g. Let's
+  Encrypt), which the lab — running inside docker — cannot obtain. The
+  ejabberd lab still runs plain-text with a shared password and open
+  registration: fine for development, not for production.
+* **ejabberd server-side check.** Derived credentials are verified by a
+  Prosody module; ejabberd would need the same logic as an external-auth
+  script.
+* **Stored messages for any agent-shaped JID.** With no account database,
+  every well-formed `<session>.<host>` JID on the agents host "exists", so
+  anyone who can reach the server can leave offline messages for sessions
+  that will never log in. Harmless, but it is storage a stranger can fill.
 * **Permission relay** (`claude/channel/permission`). This isn't declared yet.
   Senders are already server-authenticated, so it could be added for a
   specific allowlist of human operators.

@@ -192,10 +192,12 @@ Three layers:
 # admin behaviour. Requires Docker Desktop. ~20s total.
 .\.venv\Scripts\python.exe -m pytest -m docker
 
-# Channel / multi-agent suite: boots the ejabberd lab and drives real
-# `xmpp-mcp --channel` subprocesses over stdio JSON-RPC, exactly as Claude
-# Code does. Run on its own — the two labs share ports.
-.\.venv\Scripts\python.exe -m pytest -m ejabberd
+# Channel / identity / relay suites: drive real `xmpp-mcp --channel`
+# subprocesses over stdio JSON-RPC, exactly as Claude Code does, against a lab
+# — ejabberd by default, or Prosody (per-host derived credentials, verified
+# TLS, humans and agents on separate virtual hosts).
+.\.venv\Scripts\python.exe -m pytest -m agents
+.\.venv\Scripts\python.exe -m pytest -m agents --xmpp-lab prosody
 
 # Opt-in single-host integration test (just XMPP connect/disco) against a
 # server you provide via env vars.

@@ -34,7 +34,7 @@ Test markers (see `pyproject.toml`):
 | *(none)* | Pure unit tests — run anywhere. |
 | `docker` | Docker Desktop; boots Openfire via docker compose. |
 | `wire` | A current `dist\xmpp-mcp.exe` (subset of `docker`). |
-| `ejabberd` | Docker; channel / multi-agent suites against the ejabberd lab. Run alone: `pytest -m ejabberd`. |
+| `agents` | Docker; channel / identity / relay suites against an agent lab: `pytest -m agents` (ejabberd) or `pytest -m agents --xmpp-lab prosody`. |
 | `integration` | A live XMPP server you provide via env vars. |
 | `llm` | `ANTHROPIC_API_KEY` — opt-in, real Claude session. |
 

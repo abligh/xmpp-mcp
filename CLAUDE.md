@@ -31,6 +31,7 @@ src/xmpp_mcp/
   channel.py             # Claude Code channel: notification model, sender
                          #   gate, queue/pump, session-binding middleware
   identity.py            # {session}/{agent}/{host}/{fqdn} JID templating
+  credentials.py         # host-scoped derived credentials + xmpp-mcp-keys CLI
   claude_session.py      # find + watch the Claude Code session file
                          #   (session ID -> canonical JID, name -> friendly name)
   agents.py              # <agent/> presence extension + presence cache
@@ -78,6 +79,7 @@ tests/                   # unit tests (no network)
   test_webhook_routing.py    # envelope, route table, names, per-provider dedupe
   test_claude_session.py     # session discovery/watching, renames, addressing
   test_muc_client.py         # MUC bookkeeping: nicks, room keys, occupants
+  test_credentials.py        # derivation (pinned bytes), key files, CLI
   test_xmpp_client.py        # opt-in `integration` marker, needs live server
 
 tests/integration/       # docker-based E2E (two labs available — see below)
@@ -87,6 +89,12 @@ tests/integration/       # docker-based E2E (two labs available — see below)
     Dockerfile.openfire  # nasqueron/openfire:4.8.1 + REST API plugin + autosetup
     openfire.xml         # <autosetup/> pre-creates bot/alice/bob/carol
     docker-compose.yml   # project name xmpp-mcp-test; exposes 5222/5269/5275/9090
+    prosody/             # production-shaped lab (port 5322): humans on
+                         #   xmpp.test, agents on agents.xmpp.test with
+                         #   derived credentials, TLS required + verified
+      prosody.cfg.lua
+      modules/mod_auth_xmpp_mcp.lua  # server half of credentials.py
+      generated/         # CA, certs, keys (gitignored, made on first run)
     ejabberd/            # alternative lab — MAM works, and the lab the
                          #   channel/agent suites need (open XEP-0077
                          #   registration + non-anonymous rooms)
@@ -98,6 +106,7 @@ tests/integration/       # docker-based E2E (two labs available — see below)
     chat_script.py       # ChatScript — scripted multi-room conversations
     seclabel_component.py # SecurityLabelComponent — XEP-0114 stub of M-Link's
                          #   XEP-0258 catalog (on seclabel.xmpp.test)
+    prosody_lab.py       # Prosody lab setup: CA, certs, master/host keys
     stdio_mcp.py         # raw JSON-RPC stdio client — the only way to observe
                          #   channel notifications (see gotcha #20)
   test_smoke.py
@@ -113,12 +122,15 @@ tests/integration/       # docker-based E2E (two labs available — see below)
   test_resilience_e2e.py         # 3 tests — docker pause/unpause survival
   test_llm_driven_e2e.py         # 1 test — real Claude session via Anthropic SDK
                                  #   (opt-in: needs ANTHROPIC_API_KEY)
-  test_channel_e2e.py            # 13 tests — `ejabberd` marker: channel push,
+  test_channel_e2e.py            # 13 tests — `agents` marker: channel push,
                                  #   reply, MUC echo suppression, gate, agents
   test_webhook_relay_e2e.py      # 5 tests — HTTP → relay → agent channel
   test_channel_resilience_e2e.py # 1 test  — reconnect + re-join after restart
-  test_identity_e2e.py           # 6 tests — canonical JIDs, friendly names,
-                                 #   live renames, name-routed webhooks
+  test_identity_e2e.py           # 9 tests — canonical JIDs, friendly names,
+                                 #   live renames, name-routed webhooks, rooms
+  test_prosody_auth_e2e.py       # 12 tests — attacks the Prosody lab's auth
+                                 #   directly (forged / expired / cross-host /
+                                 #   revoked / plaintext); skipped on ejabberd
 
 scripts/                 # one-off demo runners (use the test fixtures + an
   demo_chat_search.py    #   in-process FastMCP Client)
@@ -181,17 +193,21 @@ python -m venv .venv
 .\.venv\Scripts\pyinstaller.exe xmpp-mcp.spec   # rebuild if stale!
 .\.venv\Scripts\python.exe -m pytest -m wire
 
-# channel / multi-agent suite — needs the ejabberd lab, NOT Openfire.
-# Must run on its own: the two labs bind the same ports (conftest deselects
-# these whenever Openfire tests are selected too).
-.\.venv\Scripts\python.exe -m pytest -m ejabberd
+# channel / identity / relay suites, against the ejabberd lab (default) or the
+# Prosody lab. ejabberd binds Openfire's ports, so with it these are
+# deselected whenever Openfire tests are selected too; Prosody (5322) doesn't.
+.\.venv\Scripts\python.exe -m pytest -m agents
+.\.venv\Scripts\python.exe -m pytest -m agents --xmpp-lab prosody
 
 # bring up the lab — choose the right server for the job
 python start-lab.py              # Openfire (legacy, of_* admin works,
                                  #   MAM doesn't — see gotcha #16)
 python start-lab-ejabberd.py     # ejabberd 25.04 (MAM works, no Openfire REST,
-                                 #   open registration + non-anonymous rooms —
-                                 #   what the channel/agent suites need)
+                                 #   open registration + non-anonymous rooms,
+                                 #   plain-text, shared password)
+python start-lab-prosody.py      # Prosody 13 on :5322 — the production shape:
+                                 #   per-host derived credentials, TLS verified,
+                                 #   humans + agents on separate vhosts
 
 # real-LLM tests (opt-in, costs API tokens, needs ANTHROPIC_API_KEY)
 $env:ANTHROPIC_API_KEY = "sk-…"
@@ -477,13 +493,38 @@ Channel/agent mode adds `XMPP_CHANNEL`, `XMPP_AGENT_NAME`, `XMPP_AGENT_ID`,
     (tests/conftest.py), because under Claude Code the suite would otherwise
     adopt the developer's own session.
 
+40. **Prosody's MUC join errors don't carry the MUC `<x/>` element**, and
+    slixmpp's `join_muc_wait` only hears errors that do — so a nick conflict
+    on Prosody surfaces as a 30 s *timeout*, not a conflict, and a fallback
+    never runs. `XMPPClient._route_join_error` re-raises any error presence
+    from a room being joined as the event the waiter listens for.
+41. **Prosody hides a room's occupants from non-members** (XEP-0045 §6.5
+    allows it): disco#items on the room is empty. That is not an empty room —
+    compare with the room's `muc#roominfo_occupants` count and report
+    `hidden`.
+42. **Agents on a subdomain can't discover the room service by disco.** With
+    agents on `agents.example.com` and rooms on `conference.example.com`,
+    disco#items on the agents' domain doesn't list it. `muc_services()` walks
+    up to the parent domain (and honours `XMPP_MUC_SERVICE`).
+43. **Prosody 13 namespaces its libraries** (`require "prosody.util.hashes"`,
+    not `"util.hashes"`), and runs as uid 100 in the official image — files
+    it must read from a bind mount need to be readable by that uid.
+44. **`pytest_addoption` only works in a conftest pytest loads before parsing
+    the command line** — `tests/conftest.py`, not `tests/integration/conftest.py`
+    (`--xmpp-lab` is defined there).
+45. **slixmpp verifies TLS against the JID's domain, even with `XMPP_HOST`
+    pinned to an address** (STARTTLS uses `server_hostname=default_domain`,
+    as RFC 7590 wants). So a private CA plus `XMPP_CA_FILE` gives real
+    verification in the lab; `XMPP_TLS_INSECURE` isn't needed.
+
 ## Test markers
 
 - `not docker and not integration` → fast unit tests, no network/Docker
 - `docker` → boots Openfire container; superset of `wire`
-- `ejabberd` → channel / multi-agent suites against the ejabberd lab. Also
-  marked `docker` (so unit runs skip them), but deselected automatically when
-  Openfire tests are selected — run `pytest -m ejabberd` on its own
+- `agents` → channel / identity / relay suites against an agent lab, chosen
+  with `--xmpp-lab ejabberd|prosody` (default ejabberd). Also marked `docker`
+  (so unit runs skip them); on ejabberd they are deselected when Openfire
+  tests are selected too (same ports)
 - `wire` → drives `dist\xmpp-mcp.exe` over real MCP stdio JSON-RPC (subset of `docker`)
 - `llm` → real Claude session via Anthropic SDK (needs `ANTHROPIC_API_KEY`)
 - `integration` → opt-in connect/disco test against a user-provided server
@@ -510,11 +551,13 @@ Channel/agent mode adds `XMPP_CHANNEL`, `XMPP_AGENT_NAME`, `XMPP_AGENT_ID`,
   handshake; FastMCP's HTTP transport answers a modern client without one, so
   nothing is delivered (the server warns at startup). Claude Code spawns MCP
   servers over stdio, which is the supported path.
-- **Channel security.** The lab runs plain-text c2s with a shared agent
-  password and open in-band registration. Production needs real TLS,
-  per-agent credentials, registration closed, and the relay behind
-  `WEBHOOK_TOKEN` / `WEBHOOK_GITHUB_SECRET`. The permission-relay capability
-  (`claude/channel/permission`) is deliberately not declared yet.
+- **Agent authentication.** The production shape is the Prosody lab:
+  per-host derived credentials (`credentials.py` + `mod_auth_xmpp_mcp.lua`),
+  TLS required and verified, registration closed. The ejabberd lab still uses
+  a shared password, open registration and plain text (development only);
+  the ejabberd equivalent of the Prosody auth module isn't built. The
+  permission-relay capability (`claude/channel/permission`) is deliberately
+  not declared yet.
 - **Relay delivery is at-most-once.** The queue survives an XMPP outage but
   not a relay restart; XEP-0198 stream management would close the gap.
 - **Webhook authentication is per-sender, and only as strong as the scheme
