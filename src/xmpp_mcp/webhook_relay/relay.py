@@ -6,7 +6,9 @@ selected provider three things — is this request authentic, what is its
 delivery ID, and how should it be described.
 
 The HTTP handler validates, formats and **queues**, answering ``200 OK``
-immediately. A single worker drains the queue into XMPP once the session is
+immediately. A friendly name the caller gave explicitly is checked against
+the directory room first, so a name nobody holds is a 404, not a queued
+message that fails later. A single worker drains the queue into XMPP once the session is
 up (joining target rooms on demand — XEP-0045 §7.4 only lets occupants
 post), reconnecting with capped backoff if the server goes away.
 """
@@ -33,12 +35,27 @@ from . import providers
 from .auth import authorised
 from .routes import load_routes
 from .settings import RelaySettings, split_csv
-from .stanza import format_body, scrub, xml_cost
+from .stanza import format_body, format_verbatim, scrub, xml_cost
 
 logger = logging.getLogger("xmpp_mcp.webhook_relay")
 
 _RECONNECT_MIN = 1.0
 _RECONNECT_MAX = 30.0
+
+# Opt-in for a body delivered exactly as posted (text/plain only).
+VERBATIM_HEADER = "X-XMPP-Verbatim"
+
+
+class NameResolutionError(RuntimeError):
+    """A friendly-name target could not be resolved (base class)."""
+
+
+class NameNotFound(NameResolutionError):
+    """No agent in the directory room holds the name."""
+
+
+class NameAmbiguous(NameResolutionError):
+    """More than one agent holds the name; the relay never guesses."""
 
 
 from .routing import RoutingError, Target, resolve_targets, strip_envelope, target_allowed
@@ -268,6 +285,16 @@ class WebhookRelay:
             raise RuntimeError(f"could not join {room}: {exc}") from exc
         self._rooms.add(room)
 
+    @property
+    def directory_ready(self) -> bool:
+        """True once the directory room's occupant list is complete.
+
+        XEP-0045 §7.2.3 sends every occupant's presence before our own, and
+        the join only completes on our own, so a joined room is a full list.
+        """
+        room = self.settings.directory_room
+        return bool(room) and self.online.is_set() and room in self._rooms
+
     def resolve_name(self, name: str) -> str:
         """The bare JID of the one agent in the directory room called ``name``.
 
@@ -277,7 +304,7 @@ class WebhookRelay:
         """
         room = self.settings.directory_room
         if not room:
-            raise RuntimeError(
+            raise NameResolutionError(
                 f"cannot resolve name {name!r}: set WEBHOOK_DIRECTORY_ROOM to a room "
                 "the agents join"
             )
@@ -292,8 +319,40 @@ class WebhookRelay:
         if len(found) == 1:
             return next(iter(found))
         if not found:
-            raise RuntimeError(f"no agent named {name!r} in {room}")
-        raise RuntimeError(f"{name!r} is ambiguous in {room}: {sorted(found)}")
+            raise NameNotFound(f"no agent named {name!r} in {room}")
+        raise NameAmbiguous(f"{name!r} is ambiguous in {room}: {sorted(found)}")
+
+    def check_names(self, targets: Any) -> web.Response | None:
+        """Resolve the name targets now; an error response if any fails.
+
+        Resolution is repeated at delivery (the name may move meanwhile), so
+        this only turns the knowable failures into an answer the caller can
+        act on: 404 nobody holds it, 409 several do, 403 the holder isn't an
+        allowed target, 503 the directory isn't loaded yet (so a caller must
+        not read "not found" into it).
+        """
+        names = [t for t in targets if t.is_name]
+        if not names:
+            return None
+        if not self.settings.directory_room:
+            return web.json_response(
+                {"error": "friendly-name targets need WEBHOOK_DIRECTORY_ROOM"}, status=400)
+        if not self.directory_ready:
+            return web.json_response(
+                {"error": "directory room not loaded yet, retry"}, status=503,
+                headers={"Retry-After": "5"})
+        for target in names:
+            try:
+                jid = self.resolve_name(target.jid)
+            except NameNotFound as exc:
+                return web.json_response({"error": str(exc)}, status=404)
+            except NameAmbiguous as exc:
+                return web.json_response({"error": str(exc)}, status=409)
+            if not target_allowed(jid, self.allowed_targets):
+                return web.json_response(
+                    {"error": f"{target.jid} resolved to {jid}, which is not allowed"},
+                    status=403)
+        return None
 
     async def _deliver(self, item: Outgoing) -> None:
         if item.target.is_name:
@@ -329,8 +388,18 @@ class WebhookRelay:
                            provider.name, request.path)
             return web.json_response({"error": "unauthorised"}, status=401)
         text = body.decode("utf-8", errors="replace")
+        verbatim = request.headers.get(VERBATIM_HEADER, "").strip().lower() in (
+            "1", "true", "yes")
+        if verbatim and request.content_type != "text/plain":
+            return web.json_response(
+                {"error": f"{VERBATIM_HEADER} needs Content-Type: text/plain"}, status=400)
+        if verbatim and not text.strip():
+            return web.json_response({"error": "empty message"}, status=400)
         payload: Any = None
-        if request.content_type == "application/json" or text.lstrip()[:1] in ("{", "["):
+        # Verbatim text is never parsed: a body that happens to look like JSON
+        # is still just text, and can't carry an envelope.
+        if not verbatim and (
+                request.content_type == "application/json" or text.lstrip()[:1] in ("{", "[")):
             try:
                 payload = json.loads(text) if text.strip() else None
             except json.JSONDecodeError as exc:
@@ -354,6 +423,13 @@ class WebhookRelay:
             return web.json_response(
                 {"error": f"target(s) {refused} not in WEBHOOK_ALLOWED_TARGETS"}, status=403,
             )
+        # Names the caller chose are checked now. Names from the operator's
+        # route table or defaults are not: one stale rule must not block the
+        # other targets of the same event, so those fail at delivery.
+        if routing.how in ("explicit", "envelope"):
+            problem = self.check_names(routing.targets)
+            if problem is not None:
+                return problem
 
         msg_id = scrub(provider.delivery_id(request.headers) or "")[:128]
         if msg_id and self._seen_ids.maxlen and self.settings.dedupe_size:
@@ -371,8 +447,11 @@ class WebhookRelay:
             text = json.dumps(payload, separators=(",", ":"), ensure_ascii=False)
             payload_json = text
 
-        summary = provider.summarise(payload, request.headers, request.path)
-        body = format_body(summary, text, s.max_message_bytes)
+        if verbatim:
+            body = format_verbatim(text, s.max_message_bytes)
+        else:
+            summary = provider.summarise(payload, request.headers, request.path)
+            body = format_body(summary, text, s.max_message_bytes)
         # The container repeats the payload, so only attach it when the whole
         # stanza still fits the byte budget.
         container = None

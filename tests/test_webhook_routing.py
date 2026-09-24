@@ -306,3 +306,131 @@ async def test_every_provider_deduplicates_by_its_own_delivery_id(headers: dict[
     finally:
         await client.close()
     assert relay.queue.qsize() == 1
+
+
+# --- names checked when the caller gives them ---------------------------------
+
+
+def _ready(relay: WebhookRelay) -> None:
+    """As if the relay were online and had joined its directory room."""
+    relay.online.set()
+    relay._rooms.add(ROOM)
+
+
+async def _post(relay: WebhookRelay, path: str, **kw: Any) -> tuple[int, dict[str, Any]]:
+    client = await _client(relay)
+    try:
+        resp = await client.post(path, **kw)
+        return resp.status, await resp.json()
+    finally:
+        await client.close()
+
+
+async def test_an_unknown_name_is_refused_not_queued() -> None:
+    relay = _relay(directory_room=ROOM)
+    _ready(relay)
+    status, got = await _post(relay, "/agent/Nobody", data="wake up")
+    assert status == 404 and "no agent named 'Nobody'" in got["error"]
+    assert relay.queue.empty()
+
+
+async def test_an_ambiguous_name_is_a_conflict() -> None:
+    relay = _relay(directory_room=ROOM)
+    _ready(relay)
+    _occupant(relay, "Reviewer", "Reviewer", "a", "a@xmpp.test/x")
+    _occupant(relay, "Reviewer (host2)", "Reviewer", "b", "b@xmpp.test/y")
+    status, _ = await _post(relay, "/agent/Reviewer", data="x")
+    assert status == 409 and relay.queue.empty()
+
+
+async def test_before_the_directory_loads_the_answer_is_retry_not_absent() -> None:
+    """A 404 here would tell a caller to give up on an agent that exists."""
+    relay = _relay(directory_room=ROOM)
+    relay.online.set()  # connected, but the room isn't joined yet
+    client = await _client(relay)
+    try:
+        resp = await client.post("/agent/Reviewer", data="x")
+        assert resp.status == 503 and resp.headers["Retry-After"]
+    finally:
+        await client.close()
+    assert relay.queue.empty()
+
+
+async def test_a_name_needs_a_directory_room_up_front() -> None:
+    status, got = await _post(_relay(), "/agent/Reviewer", data="x")
+    assert status == 400 and "WEBHOOK_DIRECTORY_ROOM" in got["error"]
+
+
+async def test_a_known_name_is_queued_as_a_name_and_resolved_again_later() -> None:
+    relay = _relay(directory_room=ROOM, allowed_targets="*@xmpp.test")
+    _ready(relay)
+    _occupant(relay, "Reviewer", "Reviewer", "sess-r", "sess-r@xmpp.test/x")
+    status, got = await _post(relay, "/agent/Reviewer", data="x")
+    assert status == 200 and got["status"] == "queued"
+    # Still the name: whoever holds it at delivery gets it.
+    assert relay.queue.get_nowait().target == Target("agent", "Reviewer")
+
+
+async def test_a_name_resolving_outside_the_allow_list_is_refused_up_front() -> None:
+    relay = _relay(directory_room=ROOM, allowed_targets="*@trusted.test")
+    _ready(relay)
+    _occupant(relay, "Reviewer", "Reviewer", "sess-r", "sess-r@xmpp.test/x")
+    status, got = await _post(relay, "/agent/Reviewer", data="x")
+    assert status == 403 and "not allowed" in got["error"]
+
+
+async def test_names_from_the_route_table_still_fail_at_delivery(tmp_path: Path) -> None:
+    """One stale rule mustn't stop the event reaching its other targets."""
+    routes = tmp_path / "routes.toml"
+    routes.write_text(f'[[route]]\nto = "Nobody"\n\n[[route]]\nroom = "{ROOM}"\n')
+    relay = _relay(routes=str(routes), directory_room=ROOM)
+    _ready(relay)
+    status, got = await _post(relay, "/", data="x")
+    assert status == 200 and len(got["targets"]) == 2
+
+
+# --- verbatim bodies -----------------------------------------------------------
+
+
+async def test_a_verbatim_body_is_the_whole_message() -> None:
+    relay = _relay()
+    text = 'From: nightly-wake\n{"looks": "like json"}\n'
+    status, _ = await _post(relay, f"/agent/{AGENT}", data=text, headers={
+        "Content-Type": "text/plain", "X-XMPP-Verbatim": "1"})
+    assert status == 200
+    item = relay.queue.get_nowait()
+    assert item.body == text  # no summary line, no blank line
+    assert item.payload_json is None  # and no <json/> container
+
+
+async def test_verbatim_is_opt_in() -> None:
+    relay = _relay()
+    await _post(relay, f"/agent/{AGENT}", data="From: x",
+                headers={"Content-Type": "text/plain"})
+    assert relay.queue.get_nowait().body.endswith("\n\nFrom: x")
+
+
+async def test_a_verbatim_body_can_not_carry_an_envelope() -> None:
+    relay = _relay()
+    status, _ = await _post(relay, "/", data='{"xmpp": {"to": "' + AGENT + '"}}', headers={
+        "Content-Type": "text/plain", "X-XMPP-Verbatim": "1"})
+    assert status == 400  # no target: the text was not read as JSON
+
+
+@pytest.mark.parametrize("headers,data", [
+    ({"Content-Type": "application/json", "X-XMPP-Verbatim": "1"}, '{"a": 1}'),
+    ({"Content-Type": "text/plain", "X-XMPP-Verbatim": "1"}, "  \n"),
+])
+async def test_verbatim_refuses_what_it_cannot_send_as_is(
+        headers: dict[str, str], data: str) -> None:
+    relay = _relay()
+    status, _ = await _post(relay, f"/agent/{AGENT}", data=data, headers=headers)
+    assert status == 400 and relay.queue.empty()
+
+
+async def test_a_verbatim_body_is_still_scrubbed_and_limited() -> None:
+    relay = _relay(max_message_bytes=256)
+    await _post(relay, f"/agent/{AGENT}", data="a\x0cb" + "x" * 400, headers={
+        "Content-Type": "text/plain", "X-XMPP-Verbatim": "1"})
+    body = relay.queue.get_nowait().body
+    assert body.startswith("a�b") and body.endswith("…[truncated]")

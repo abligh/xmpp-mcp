@@ -493,18 +493,39 @@ listed.
 `/agent/Reviewer`, `{"xmpp": {"to": "Reviewer"}}`) is a friendly name. It is
 resolved **at delivery time** against the agents in `WEBHOOK_DIRECTORY_ROOM`
 (the relay joins it), so "PRs go to the Reviewer" keeps working as sessions
-come and go, and follows a rename. An ambiguous or unknown name fails that
-delivery (counted in `failed`) rather than guessing. The resolved JID is
-still checked against `WEBHOOK_ALLOWED_TARGETS`.
+come and go, and follows a rename. The resolved JID is still checked against
+`WEBHOOK_ALLOWED_TARGETS`.
+
+A name **the caller gave** (explicit or envelope) is also checked when the
+request arrives, so a mistake is an answer rather than a queued message that
+fails later: `404` if no agent in the room holds it, `409` if several do,
+`403` if its holder isn't an allowed target. Until the relay has joined the
+directory room it answers `503` with `Retry-After`, since "not loaded yet" is
+not "absent": don't treat that as a missing agent. The name is resolved again
+at delivery. Names from the route table or the defaults are checked only at
+delivery, where an ambiguous or unknown one fails (counted in `failed`)
+without stopping the event's other targets.
+
+**Verbatim bodies.** Normally the message starts with the provider's summary
+line and a blank line, and a JSON body also rides along in a `<json/>`
+container. A sender that composes its own message posts it as
+`Content-Type: text/plain` with `X-XMPP-Verbatim: 1`. The body is then the
+whole message, as sent: never parsed (so it can't carry an envelope) and
+nothing added. It is still scrubbed of characters XML forbids, and cut to
+`WEBHOOK_MAX_MESSAGE_BYTES`. The receiving agent's channel still shows who
+sent it, in front ("<sender> (direct): …").
 
 **Response:** `200 {"status":"queued","id":…,"routed_by":…,"targets":[{"to":…,"kind":…}]}`
 as soon as the message is queued, whether or not XMPP is currently connected.
 `routed_by` is `explicit`, `envelope`, `routes` (with the matching rules'
 names) or `default`. A repeated delivery ID (`X-GitHub-Delivery`,
 `X-Gitlab-Event-UUID`, or `X-Webhook-Delivery` / `X-Request-Id` for generic
-senders) answers `{"status":"duplicate"}` without queuing anything. Errors: `400` (no or invalid target, invalid JSON), `401` (auth),
-`403` (target not in `WEBHOOK_ALLOWED_TARGETS`), `413` (body too large),
-`503` (queue full). `GET /healthz` reports connection state and counters.
+senders) answers `{"status":"duplicate"}` without queuing anything. Errors: `400` (no or invalid target, invalid JSON, verbatim
+without `text/plain` or with an empty body), `401` (auth), `403` (target not
+in `WEBHOOK_ALLOWED_TARGETS`), `404` / `409` (a name nobody or several hold),
+`413` (body too large), `503` (queue full, or the directory not loaded yet).
+"Queued" is not "delivered": delivery is at-most-once and the queue does not
+survive a relay restart. `GET /healthz` reports connection state and counters.
 
 ### Providers (what is source-specific)
 

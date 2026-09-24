@@ -44,22 +44,31 @@ than ``sent``.
 from __future__ import annotations
 
 from .providers import GENERIC, PROVIDERS, Provider, detect
-from .relay import Outgoing, WebhookRelay, serve
+from .relay import (
+    VERBATIM_HEADER,
+    NameAmbiguous,
+    NameNotFound,
+    NameResolutionError,
+    Outgoing,
+    WebhookRelay,
+    serve,
+)
 from .routes import Route, RouteError, load_routes, parse_routes
 from .routing import (
     Routing, RoutingError, Target, resolve_target, resolve_targets, strip_envelope,
     target_allowed,
 )
 from .settings import RelaySettings
-from .stanza import format_body, scrub, truncate_to_bytes, xml_cost
+from .stanza import format_body, format_verbatim, scrub, truncate_to_bytes, xml_cost
 
 __all__ = [
     "GENERIC", "PROVIDERS", "Provider", "detect",
+    "VERBATIM_HEADER", "NameAmbiguous", "NameNotFound", "NameResolutionError",
     "Outgoing", "WebhookRelay", "serve",
     "Route", "RouteError", "load_routes", "parse_routes",
     "Routing", "RoutingError", "Target", "resolve_target", "resolve_targets",
     "strip_envelope", "target_allowed",
-    "RelaySettings", "format_body", "scrub", "truncate_to_bytes", "xml_cost",
+    "RelaySettings", "format_body", "format_verbatim", "scrub", "truncate_to_bytes", "xml_cost",
     "main",
 ]
 

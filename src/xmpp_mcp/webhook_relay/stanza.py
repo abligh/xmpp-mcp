@@ -56,7 +56,16 @@ def format_body(summary: str, raw: str, limit: int) -> str:
     ``limit`` counts bytes after XML escaping (see :func:`_xml_cost`), so the
     result is safe to put in a stanza whatever the payload contained.
     """
-    body = scrub(f"{summary}\n\n{raw}" if raw else summary)
+    return fit(scrub(f"{summary}\n\n{raw}" if raw else summary), limit)
+
+
+def format_verbatim(raw: str, limit: int) -> str:
+    """``raw`` as the whole body: scrubbed and truncated, nothing added."""
+    return fit(scrub(raw), limit)
+
+
+def fit(body: str, limit: int) -> str:
+    """``body`` (already scrubbed) truncated to ``limit`` stanza bytes, marked if cut."""
     if xml_cost(body) <= limit:
         return body
     budget = limit - xml_cost(_TRUNCATED)
