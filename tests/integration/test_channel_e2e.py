@@ -151,7 +151,10 @@ async def test_pushed_text_says_who_and_where(spawn_agent, lab: LabHandle) -> No
         await alice.join_muc(room, "alice")
         alice.send_groupchat(room, "room words")
         in_room = await agent.next_event()
-    assert direct["content"] == "alice@xmpp.test (direct): direct words"
+    # A name if the agent knows one (on the Prosody lab, mod_agent_roster puts
+    # alice in its contacts as "alice"), else the address.
+    assert direct["content"] in ("alice@xmpp.test (direct): direct words",
+                                 "alice (direct): direct words")
     assert in_room["content"] == f"alice in {room.split('@')[0]}: room words"
     assert in_room["meta"]["sender_jid"] == "alice@xmpp.test"  # exact data unchanged
 

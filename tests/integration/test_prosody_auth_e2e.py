@@ -175,3 +175,47 @@ async def test_mail_waits_for_an_agent_that_has_logged_in(prosody: LabHandle) ->
         alice.send_chat(jid, "for when you're back")
         with pytest.raises(asyncio.TimeoutError):
             await asyncio.wait_for(errors.get(), timeout=3)  # accepted, not bounced
+
+
+# --- mod_agent_roster: people and agents in each other's contacts -------------------
+
+
+async def test_people_and_agents_see_each_other_by_name(prosody: LabHandle, spawn_agent) -> None:
+    """Agents in the Everyone room appear in people's contact lists, named and
+    kept current; people appear in agents'. Presence flows both ways."""
+    from .test_identity_e2e import _rename, _until
+
+    everyone = "everyone@conference.xmpp.test"
+    agent = await spawn_agent("roster", "--join", everyone, claude_name="Reviewer")
+    async with prosody.raw("alice") as alice:
+        client = alice._client
+
+        async def listed(name):
+            await client.get_roster()
+            entry = client.client_roster[agent.jid]
+            return (entry["name"], entry["subscription"], list(entry["groups"])) == (
+                name, "both", ["Agents"])
+
+        await _until(lambda: listed("Reviewer"), timeout=20)
+        # Presence flows: alice sees the agent online.
+        await _until(lambda: _available(client, agent.jid), timeout=15)
+
+        # A rename reaches alice as a roster push, without her asking again.
+        _rename(agent.session_file, "Critic", "user")
+
+        async def pushed():
+            entry = client.client_roster[agent.jid]
+            return entry["name"] == "Critic"
+
+        await _until(pushed, timeout=30)
+
+    # And the agent has alice in its contacts, as one of the people.
+    contacts = {c["jid"]: c for c in (await agent.call("get_roster"))["contacts"]}
+    assert contacts["alice@xmpp.test"]["name"] == "alice"
+    assert contacts["alice@xmpp.test"]["subscription"] == "both"
+    assert contacts["alice@xmpp.test"]["groups"] == ["People"]
+
+
+async def _available(client, jid) -> bool:
+    return any(p.get("show") in ("", "available", "chat", "away", "dnd", "xa") or p
+               for p in client.client_roster.presence(jid).values())

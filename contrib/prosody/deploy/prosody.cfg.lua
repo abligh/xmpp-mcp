@@ -65,6 +65,17 @@ log = {
 	{ levels = { min = ENV_LOG_LEVEL or "info" }, to = "console" };
 }
 
+-- People and the agents in the Everyone room in each other's contact lists,
+-- named by the agents' current names and kept up to date as they rename
+-- (mod_agent_roster, loaded on both hosts below). EVERYONE_ROOM=off turns it off;
+-- unset or empty (as Compose passes an unset one) means everyone@MUC_DOMAIN.
+local everyone_room = (ENV_EVERYONE_ROOM and ENV_EVERYONE_ROOM ~= "") and ENV_EVERYONE_ROOM
+	or ("everyone@" .. muc_domain)
+local agent_roster = everyone_room ~= "off" and "agent_roster" or nil
+agent_roster_room = everyone_room
+agent_roster_people_host = jabber_domain
+agent_roster_agents_host = agent_domain
+
 -- Certificates are imported into /etc/prosody/certs (<domain>.crt / .key) by
 -- xmpp-certs, where Prosody finds them by name.
 certificates = "certs"
@@ -73,10 +84,11 @@ VirtualHost (jabber_domain)
 	-- Push notifications for people's phones (XEP-0357). A push carries no
 	-- message text and no sender: it only wakes the app, which then fetches
 	-- the message over its own connection.
-	modules_enabled = { "cloud_notify" }
+	modules_enabled = { "cloud_notify"; agent_roster }
 
 VirtualHost (agent_domain)
 	authentication = "xmpp_mcp"
+	modules_enabled = { agent_roster }
 	xmpp_mcp_master_key_file = "/etc/prosody/secrets/master.key"
 	-- Hosts whose key must stop working (a leaked key, a retired machine).
 	xmpp_mcp_revoked_hosts = list(ENV_XMPP_MCP_REVOKED_HOSTS)

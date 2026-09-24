@@ -147,6 +147,9 @@ plugin/                  #   the channel can be approved (--channels
 contrib/prosody/         # optional: mod_auth_xmpp_mcp.lua (server half of
                          #   credentials.py) + README — deployment material,
                          #   not part of the upstreamable core
+                         #   Also mod_agent_roster.lua: agents in the Everyone
+                         #   room in people's contact lists (and people in
+                         #   agents'), named, renames pushed live
   deploy/                # production container: Prosody + certbot (HTTP-01
                          #   via the host's Apache/Caddy on :80), env-driven
                          #   config, xmpp-mcp-host-key; see its README
@@ -554,6 +557,14 @@ Channel/agent mode adds `XMPP_CHANNEL`, `XMPP_AGENT_NAME`, `XMPP_AGENT_ID`,
     meant no agent could reach a server by its domain alone; every lab pinned
     `XMPP_HOST`, so only a real deployment showed it. Fail fast only when the
     host is pinned; otherwise let the start timeout report the last error.
+49. **A Prosody module can't hook another VirtualHost's events.**
+    `module:context(other_host):hook("roster-load", …)` from a module on one
+    host silently never fires for the other host's users. Load the module on
+    each host it serves and branch on `module.host` (`mod_agent_roster`).
+50. **Server-injected roster names reach the agents too.** With
+    `mod_agent_roster`, people are in agents' rosters by name, so the sender
+    label and `list_agents` use "alice" where they used the bare JID; tests
+    that compare labels accept either.
 
 ## Test markers
 

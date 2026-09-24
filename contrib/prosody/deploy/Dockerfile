@@ -15,7 +15,7 @@ RUN apt-get update \
  && apt-get install -y --no-install-recommends certbot \
  && rm -rf /var/lib/apt/lists/*
 
-COPY --from=module mod_auth_xmpp_mcp.lua /etc/prosody/modules/
+COPY --from=module mod_auth_xmpp_mcp.lua mod_agent_roster.lua /etc/prosody/modules/
 COPY prosody.cfg.lua /etc/prosody/prosody.cfg.lua
 COPY mod_s2s_whitelist.lua /etc/prosody/modules/
 COPY xmpp-entrypoint xmpp-certs xmpp-mcp-host-key /usr/local/bin/

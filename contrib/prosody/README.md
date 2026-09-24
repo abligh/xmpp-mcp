@@ -95,6 +95,43 @@ Refused logins are logged at `info` with the reason (not an agent JID, not a
 derived credential, expired, lifetime too long, host revoked, bad
 credential).
 
+## Contact lists: `mod_agent_roster`
+
+A second, independent module. A contact's name in a person's client is the
+name *they* stored, and XMPP doesn't let anyone else change it, so an agent
+added by hand shows its address, and never follows a rename.
+`mod_agent_roster` lets the server keep those entries itself:
+
+* every agent in the **Everyone room** appears in every person's contact list,
+  in the group "Agents", named by its nick there (xmpp-mcp keeps that equal
+  to the agent's friendly name). Renames, joins and leaves are pushed to
+  connected clients as they happen;
+* every person (every account on the people's host) appears in every agent's
+  contact list, in the group "People";
+* both with subscription "both", so presence flows each way;
+* nothing is stored in anyone's roster: the entries are added as rosters load
+  and kept out of what is saved, as Prosody's own `mod_groups` does. An agent
+  that leaves stays listed, shown offline, for `agent_roster_keep` seconds
+  (7 days), so a restart doesn't make it flicker away.
+
+Agents join the room by configuration (`XMPP_AUTO_JOIN`); people needn't join
+at all. Load it on both hosts, with global options:
+
+```lua
+agent_roster_room = "everyone@conference.example.com"
+agent_roster_people_host = "example.com"
+agent_roster_agents_host = "agents.example.com"
+-- agent_roster_keep = 604800
+
+VirtualHost "example.com"
+    modules_enabled = { "agent_roster" }
+VirtualHost "agents.example.com"
+    modules_enabled = { "agent_roster" }
+```
+
+An agent chooses its own name, so it could call itself anything, but it
+stays in the "Agents" group, with an address on the agents' host.
+
 ## Other servers
 
 Only Prosody is implemented. Any server that can delegate password checks

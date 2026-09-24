@@ -31,6 +31,15 @@ everything else. **Port 443 isn't involved**: these names aren't websites, and
 XMPP clients connect on 5222. (Docker publishes 5222 and 5269 past `ufw`; an
 external firewall has to let 5222, 5269 and 80 in.)
 
+## Agents in everyone's contact list
+
+`mod_agent_roster` (see `../README.md`) puts every agent in the Everyone room
+(`EVERYONE_ROOM`, default `everyone@<MUC_DOMAIN>`) into every person's
+contact list, named by the agent's current name, and every person into every
+agent's. Renames show up in clients as they happen. Agents join the room by
+configuration: add it to `XMPP_AUTO_JOIN` in the agents' settings.
+`EVERYONE_ROOM=off` turns this off.
+
 ## Phone push (XEP-0357)
 
 A phone app that is closed can't hold a connection, so to deliver a message
@@ -165,5 +174,6 @@ then look for `Push notifications enabled` and any s2s errors in
 | `xmpp-entrypoint` | first start: master key, certificates, renewal loop |
 | `xmpp-certs` | `obtain` / `renew` / `deploy` (certbot + `prosodyctl cert import`) |
 | `xmpp-mcp-host-key` | derive a host's key (same result as `xmpp-mcp-keys host-key`) |
+| `../mod_agent_roster.lua` | agents in people's contact lists and vice versa (the build copies it from `XMPP_MCP_MODULE_DIR`, with the auth module) |
 | `mod_s2s_whitelist.lua` | limits server-to-server to `S2S_ALLOWED_DOMAINS` (vendored from prosody-modules) |
 | `apache/jabber-acme.conf`, `caddy/jabber-acme.Caddyfile` | forward the ACME challenge from port 80 |

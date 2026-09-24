@@ -215,6 +215,11 @@ they couldn't tell a person from an agent, or a room from a direct message.
 The attributes still carry the exact addresses. `XMPP_CHANNEL_LABEL_SENDER=false`
 pushes the bare text.
 
+People's clients name contacts from their own contact lists, which only they
+can edit. On Prosody, `contrib/prosody/mod_agent_roster.lua` has the server
+keep every agent in the Everyone room in every person's contact list, under
+its current name, renames included.
+
 | `meta` key | When | Meaning |
 |---|---|---|
 | `sender` | always | Full JID the stanza came from (`room@service/nick` for room traffic) |

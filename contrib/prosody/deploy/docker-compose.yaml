@@ -28,6 +28,7 @@ services:
       PROSODY_ADMINS: ${PROSODY_ADMINS:-}
       XMPP_MCP_REVOKED_HOSTS: ${XMPP_MCP_REVOKED_HOSTS:-}
       S2S_ALLOWED_DOMAINS: ${S2S_ALLOWED_DOMAINS:-}
+      EVERYONE_ROOM: ${EVERYONE_ROOM:-}
     ports:
       - "5222:5222"                         # XMPP clients (STARTTLS, required)
       - "5269:5269"                         # server-to-server, S2S_ALLOWED_DOMAINS only
