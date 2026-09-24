@@ -1,0 +1,34 @@
+# One long-lived Claude Code agent per instance: claude-agent@NAME.
+#
+# It runs `claude-agent-run NAME` in its own tmux server (an interactive
+# Remote Control session needs a terminal); attach with
+#   tmux -L agent-NAME attach
+# When Claude Code exits — a crash, or Remote Control giving up after a long
+# network outage — tmux exits with it and systemd starts it again, resuming
+# the same conversation.
+#
+# Install: copy to /etc/systemd/system/ (or ~/.config/systemd/user/ without
+# the User= line), set User= below, then
+#   systemctl daemon-reload && systemctl enable --now claude-agent@NAME
+
+[Unit]
+Description=Claude Code agent %i (Remote Control + XMPP channel)
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=600
+StartLimitBurst=10
+
+[Service]
+Type=forking
+User=claude
+Environment=HOME=/home/claude
+Environment=PATH=/home/claude/.local/bin:/usr/local/bin:/usr/bin:/bin
+EnvironmentFile=/home/claude/.config/claude-agents/%i.env
+ExecStart=/usr/bin/tmux -L agent-%i new-session -d -s %i -x 200 -y 50 /home/claude/.local/bin/claude-agent-run %i
+# Ctrl-C twice is Claude Code's own clean exit; then give it a moment.
+ExecStop=/bin/sh -c 'tmux -L agent-%i send-keys -t %i C-c; sleep 1; tmux -L agent-%i send-keys -t %i C-c; sleep 5'
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

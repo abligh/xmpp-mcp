@@ -1,0 +1,54 @@
+#!/bin/bash
+# claude-agent-run NAME — run one long-lived Claude Code agent: an interactive
+# Remote Control session (reachable from claude.ai and the app) with the XMPP
+# channel, resuming its own conversation every time it starts.
+#
+# Started inside tmux by claude-agent@NAME.service (an interactive session needs
+# a terminal). Settings come from ~/.config/claude-agents/NAME.env:
+#   AGENT_DIR   the directory the agent works in (must already be trusted)
+#   XMPP_*      xmpp-mcp's settings (JID template, host key, rooms, ...)
+#
+# Resuming: the session ID is recorded in ~/.local/state/claude-agents/NAME.session
+# once the conversation exists, and passed back with --resume on every later
+# start. The ID does not change on resume, so neither do the claude.ai session
+# or the agent's XMPP address. Delete the file to start the agent afresh.
+
+set -u
+name=${1:?usage: claude-agent-run NAME}
+conf=$HOME/.config/claude-agents/$name.env
+state_dir=$HOME/.local/state/claude-agents
+state=$state_dir/$name.session
+
+# Loaded by systemd already; sourced here too so the script runs by hand.
+set -a
+# shellcheck source=/dev/null
+[[ -f $conf ]] && . "$conf"
+set +a
+: "${AGENT_DIR:?set AGENT_DIR in $conf}"
+mkdir -p "$state_dir"
+cd "$AGENT_DIR" || exit 1
+
+args=(--remote-control "$name" --name "$name"
+      --channels plugin:xmpp@xmpp-mcp
+      --settings '{"enabledPlugins": {"xmpp@xmpp-mcp": true}}')
+if [[ -s $state ]]; then
+	args+=(--resume "$(<"$state")")
+fi
+
+# After exec, Claude Code runs as this PID and writes ~/.claude/sessions/<pid>.json.
+# Record its session ID — but only once the transcript exists: resuming an ID
+# with no conversation yet fails at once, and the unit would restart in a loop.
+me=$$
+(
+	while kill -0 "$me" 2>/dev/null; do
+		id=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["sessionId"])' \
+			"$HOME/.claude/sessions/$me.json" 2>/dev/null)
+		if [[ -n $id ]] && compgen -G "$HOME/.claude/projects/*/$id.jsonl" >/dev/null; then
+			[[ $(cat "$state" 2>/dev/null) == "$id" ]] || { echo "$id" >"$state.new" && mv "$state.new" "$state"; }
+			exit 0
+		fi
+		sleep 5
+	done
+) &
+
+exec claude "${args[@]}"
