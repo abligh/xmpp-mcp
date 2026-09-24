@@ -1,0 +1,15 @@
+{
+  "name": "xmpp",
+  "description": "Turns a Claude Code session into an addressable agent on an XMPP server. Inbound messages are pushed into the session as a channel (--channels plugin:xmpp@xmpp-mcp); tools to reply, list agents and use rooms.",
+  "version": "0.1.0",
+  "author": {
+    "name": "Alex Bligh"
+  },
+  "keywords": [
+    "xmpp",
+    "jabber",
+    "channel",
+    "agents",
+    "mcp"
+  ]
+}

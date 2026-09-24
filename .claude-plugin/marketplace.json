@@ -1,0 +1,14 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "xmpp-mcp",
+  "description": "XMPP for Claude Code: agents that message each other and people over any XMPP server",
+  "owner": { "name": "Alex Bligh" },
+  "plugins": [
+    {
+      "name": "xmpp",
+      "description": "Turns the session into an addressable XMPP agent: inbound messages are pushed in as a channel; reply, list_agents and room tools. Needs the xmpp-mcp command installed.",
+      "category": "development",
+      "source": "./plugin"
+    }
+  ]
+}
