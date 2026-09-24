@@ -8,8 +8,9 @@
 --   MUC_DOMAIN      rooms, shared by both
 --
 -- TLS is required for every client; certificates come from Let's Encrypt via
--- xmpp-certs (one per client domain). Server-to-server is off: only users of
--- this server can send anything to anyone on it.
+-- xmpp-certs (one per client domain). Server-to-server is off, except to the
+-- domains in S2S_ALLOWED_DOMAINS (phone push services): only users of this
+-- server can send anything to anyone on it.
 
 local function list(s)
 	local parts = {};
@@ -33,7 +34,20 @@ modules_enabled = {
 	"pep"; "private"; "vcard4"; "vcard_legacy";
 	"offline"; "mam"; "limits"; "admin_shell";
 }
-modules_disabled = { "s2s" }
+
+-- Server-to-server, only to S2S_ALLOWED_DOMAINS. Phones need it for push
+-- (XEP-0357): the server wakes the app through its vendor's push service
+-- (Monal: eu.prod.push.monal-im.org), which it reaches over s2s. Every other
+-- domain is refused in both directions by mod_s2s_whitelist; with the list
+-- empty, s2s is not loaded at all.
+local s2s_allowed = list(ENV_S2S_ALLOWED_DOMAINS)
+if #s2s_allowed > 0 then
+	modules_enabled:append({ "s2s_whitelist"; "dialback"; "s2s_bidi" })
+	s2s_whitelist = s2s_allowed
+	s2s_require_encryption = true
+else
+	modules_disabled = { "s2s" }
+end
 
 allow_registration = false
 c2s_require_encryption = true
@@ -56,6 +70,10 @@ log = {
 certificates = "certs"
 
 VirtualHost (jabber_domain)
+	-- Push notifications for people's phones (XEP-0357). A push carries no
+	-- message text and no sender: it only wakes the app, which then fetches
+	-- the message over its own connection.
+	modules_enabled = { "cloud_notify" }
 
 VirtualHost (agent_domain)
 	authentication = "xmpp_mcp"
@@ -69,7 +87,7 @@ VirtualHost (agent_domain)
 	}
 
 Component (muc_domain) "muc"
-	modules_enabled = { "muc_mam" }
+	modules_enabled = { "muc_mam"; #s2s_allowed > 0 and "s2s_whitelist" or nil }
 	-- Anyone with an account (people and agents) may create a room; agents
 	-- create them simply by joining, so rooms are usable at once.
 	restrict_room_creation = false

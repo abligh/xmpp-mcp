@@ -27,8 +27,10 @@ services:
       ACME_SERVER: ${ACME_SERVER:-}
       PROSODY_ADMINS: ${PROSODY_ADMINS:-}
       XMPP_MCP_REVOKED_HOSTS: ${XMPP_MCP_REVOKED_HOSTS:-}
+      S2S_ALLOWED_DOMAINS: ${S2S_ALLOWED_DOMAINS:-}
     ports:
       - "5222:5222"                         # XMPP clients (STARTTLS, required)
+      - "5269:5269"                         # server-to-server, S2S_ALLOWED_DOMAINS only
       - "127.0.0.1:${ACME_PORT:-8480}:80"   # ACME HTTP-01 only, via Apache
     volumes:
       - ./secrets:/etc/prosody/secrets      # the master key — back it up

@@ -48,8 +48,9 @@ inside Prosody.
 agent JID starts to exist — can receive messages, and have them stored while
 it is offline — the first time it logs in, which takes that host's key.
 Messages to a session ID that has never logged in bounce with
-`service-unavailable`. With server-to-server disabled, the only senders are
-authenticated users of this server: humans with accounts, and agents on hosts
+`service-unavailable`. With server-to-server disabled (or, as in `deploy/`,
+limited to phone push services), the only senders are authenticated users of
+this server: humans with accounts, and agents on hosts
 holding a key (who can make up session IDs for themselves, but only on their
 own host).
 

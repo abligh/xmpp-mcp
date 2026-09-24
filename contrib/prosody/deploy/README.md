@@ -15,20 +15,40 @@ below are the placeholders from `.env.example`.
 Both client domains need their own certificate because an XMPP client checks
 the certificate against the domain of the JID it logs in as. The room service
 needs no DNS record and no certificate: clients reach it through the server,
-and server-to-server is switched off.
+and no other server may talk to it.
 
 ## What is exposed
 
 | Port | Where | Why |
 |---|---|---|
 | 5222/tcp | all interfaces | XMPP clients; STARTTLS is required, then SASL |
+| 5269/tcp | all interfaces | server-to-server, only with the push services in `S2S_ALLOWED_DOMAINS` |
 | 8480/tcp | 127.0.0.1 only | certbot's HTTP-01 answers, reached through the host's web server |
 
 Port 80 stays with the host's web server, which forwards
 `/.well-known/acme-challenge/` for the two names to 127.0.0.1:8480 and refuses
 everything else. **Port 443 isn't involved**: these names aren't websites, and
-XMPP clients connect on 5222. (Docker publishes 5222 past `ufw`; an external
-firewall has to let 5222 and 80 in.)
+XMPP clients connect on 5222. (Docker publishes 5222 and 5269 past `ufw`; an
+external firewall has to let 5222, 5269 and 80 in.)
+
+## Phone push (XEP-0357)
+
+A phone app that is closed can't hold a connection, so to deliver a message
+the server has to wake it: it sends a notification to the app vendor's push
+service, which passes it to Apple or Google. The notification carries no
+message text and no sender; the woken app fetches the message itself.
+
+That hop is server-to-server XMPP, so `S2S_ALLOWED_DOMAINS` lists the push
+services this server may talk to — for Monal `eu.prod.push.monal-im.org`, for
+Conversations `p2.conversations.im`. `mod_s2s_whitelist` refuses every other
+domain in both directions: messages to other servers bounce with
+`not-allowed`, and a server claiming to be anything else is disconnected
+before it can authenticate. With the setting empty, server-to-server isn't
+loaded at all. Changes apply with `docker compose up -d`.
+
+To check push is working, send yourself a message while the app is closed,
+then look for `Push notifications enabled` and any s2s errors in
+`docker compose logs`.
 
 ## Setting it up
 
@@ -130,8 +150,9 @@ firewall has to let 5222 and 80 in.)
 * **Logs**: `docker compose logs`. Refused agent logins are logged with the
   reason.
 * **Who can send what**: only users of this server — people with accounts,
-  and agents on hosts holding a key. An agent JID can receive mail only once
-  it has logged in. See `../README.md`.
+  and agents on hosts holding a key. The push services in
+  `S2S_ALLOWED_DOMAINS` can connect, but only to receive notifications. An
+  agent JID can receive mail only once it has logged in. See `../README.md`.
 
 ## Files
 
@@ -144,4 +165,5 @@ firewall has to let 5222 and 80 in.)
 | `xmpp-entrypoint` | first start: master key, certificates, renewal loop |
 | `xmpp-certs` | `obtain` / `renew` / `deploy` (certbot + `prosodyctl cert import`) |
 | `xmpp-mcp-host-key` | derive a host's key (same result as `xmpp-mcp-keys host-key`) |
+| `mod_s2s_whitelist.lua` | limits server-to-server to `S2S_ALLOWED_DOMAINS` (vendored from prosody-modules) |
 | `apache/jabber-acme.conf`, `caddy/jabber-acme.Caddyfile` | forward the ACME challenge from port 80 |

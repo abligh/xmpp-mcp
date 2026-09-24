@@ -17,13 +17,15 @@ RUN apt-get update \
 
 COPY --from=module mod_auth_xmpp_mcp.lua /etc/prosody/modules/
 COPY prosody.cfg.lua /etc/prosody/prosody.cfg.lua
+COPY mod_s2s_whitelist.lua /etc/prosody/modules/
 COPY xmpp-entrypoint xmpp-certs xmpp-mcp-host-key /usr/local/bin/
 RUN chmod 0755 /usr/local/bin/xmpp-entrypoint /usr/local/bin/xmpp-certs \
                /usr/local/bin/xmpp-mcp-host-key
 
 # Port 80 is only for certbot's HTTP-01 answers (published on localhost and
-# reached through the host's web server); 5222 is XMPP.
-EXPOSE 80 5222
+# reached through the host's web server); 5222 is XMPP clients, 5269 other
+# servers (only those in S2S_ALLOWED_DOMAINS).
+EXPOSE 80 5222 5269
 
 ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/xmpp-entrypoint"]
 CMD ["prosody", "-F"]
