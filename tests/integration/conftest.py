@@ -597,6 +597,8 @@ async def spawn_agent(lab: LabHandle, tmp_path: Path):
             "XMPP_AGENT_HOST": "lab",
             "XMPP_AGENT_ID": f"session-{agent_name}",
             "CLAUDE_CONFIG_DIR": str(config_dir),
+            # Assertions compare the plain text; test_channel_e2e checks labels.
+            "XMPP_CHANNEL_LABEL_SENDER": "false",
         }
         cli = lab.agent_cli()
         session_file = None

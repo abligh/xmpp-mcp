@@ -141,6 +141,21 @@ async def test_room_message_pushed_and_own_echo_suppressed(
     assert meta["sender_jid"] == "alice@xmpp.test"  # non-anonymous room
 
 
+async def test_pushed_text_says_who_and_where(spawn_agent, lab: LabHandle) -> None:
+    """People watching a session see only the text: it names the sender."""
+    room = _room(lab)
+    agent = await spawn_agent("lbl", "--join", room, env={"XMPP_CHANNEL_LABEL_SENDER": "true"})
+    async with lab.raw("alice") as alice:
+        alice.send_chat(agent.jid, "direct words")
+        direct = await agent.next_event()
+        await alice.join_muc(room, "alice")
+        alice.send_groupchat(room, "room words")
+        in_room = await agent.next_event()
+    assert direct["content"] == "alice@xmpp.test (direct): direct words"
+    assert in_room["content"] == f"alice in {room.split('@')[0]}: room words"
+    assert in_room["meta"]["sender_jid"] == "alice@xmpp.test"  # exact data unchanged
+
+
 async def test_reply_to_room_posts_groupchat(spawn_agent, lab: LabHandle) -> None:
     room = _room(lab)
     agent = await spawn_agent("mrep", "--join", room)

@@ -157,6 +157,13 @@ class Settings(BaseSettings):
             "message to Claude Code as a notifications/claude/channel event"
         ),
     )
+    xmpp_channel_label_sender: bool = Field(
+        True,
+        description=(
+            "Begin each pushed message's text with who sent it and where "
+            "(\"alice in agents: …\"): Claude Code shows people only the text"
+        ),
+    )
     xmpp_channel_allow: str | None = Field(
         None,
         description=(

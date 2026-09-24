@@ -57,6 +57,7 @@ def _make_lifespan(
             bridge = ChannelBridge(
                 SenderGate(settings.channel_allow_patterns),
                 max_pending=settings.xmpp_inbox_size,
+                labelled=settings.xmpp_channel_label_sender,
             )
             xmpp.add_message_listener(bridge.submit)
             logger.info(
@@ -100,7 +101,8 @@ def create_server(**overrides: Any) -> FastMCP:
     if settings.xmpp_channel:
         experimental[CHANNEL_CAPABILITY] = {}
         instructions = (
-            channel_instructions(settings.xmpp_jid, settings.display_name)
+            channel_instructions(settings.xmpp_jid, settings.display_name,
+                                 settings.xmpp_channel_label_sender)
             + "\n\n" + _BASE_INSTRUCTIONS
         )
 

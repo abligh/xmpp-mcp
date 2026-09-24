@@ -64,7 +64,7 @@ class ChannelNotification(BaseModel):
     params: ChannelNotificationParams
 
 
-def channel_instructions(jid: str, agent_name: str | None) -> str:
+def channel_instructions(jid: str, agent_name: str | None, labelled: bool = True) -> str:
     """The ``instructions`` string Claude Code shows the model for this channel.
 
     Sent once, at initialize — so it states the canonical address, which
@@ -80,6 +80,9 @@ def channel_instructions(jid: str, agent_name: str | None) -> str:
         "Messages they send you are pushed into this session as "
         '<channel source="..." sender="..." type="..." reply_to="...">text</channel> '
         "tags — you do not need to poll for them.\n"
+        + ("The text begins with who sent it and where (\"alice in agents: …\", "
+           "\"alice (direct): …\"); the attributes carry the exact addresses.\n"
+           if labelled else "") +
         "- type=\"chat\" (or \"normal\") is a one-to-one message from `sender`; "
         "`sender_name`, when present, is that peer's friendly name.\n"
         "- type=\"groupchat\" is a message in the multi-user chat room `room`, "
@@ -178,11 +181,31 @@ def build_meta(record: dict[str, Any]) -> dict[str, str]:
     return meta
 
 
+def label(record: dict[str, Any]) -> str:
+    """The message text, prefixed with who sent it and where.
+
+    Claude Code shows people only a channel message's text, not its meta, so
+    without this nobody watching the session can tell a person from an agent,
+    or a room from a direct message: ``alice in agents: hello``,
+    ``alice (direct): hello``. The name is the sender's friendly name, else
+    its room nick, else its bare address.
+    """
+    who = (record.get("sender_name") or record.get("nick")
+           or record.get("sender_jid") or str(record["from"]).split("/", 1)[0])
+    who = _meta_value(who) or "?"
+    if record["type"] == "groupchat" and record.get("room"):
+        where = f" in {_meta_value(str(record['room']).split('@', 1)[0])}"
+    else:
+        where = " (direct)"
+    return f"{who}{where}: {record['body']}"
+
+
 class ChannelBridge:
     """Queue of inbound messages waiting to be pushed to the Claude Code session."""
 
-    def __init__(self, gate: SenderGate, max_pending: int = 500) -> None:
+    def __init__(self, gate: SenderGate, max_pending: int = 500, labelled: bool = True) -> None:
         self.gate = gate
+        self.labelled = labelled
         self._queue: asyncio.Queue[ChannelNotification] = asyncio.Queue(max_pending)
         self._session: Any = None
         self._pump: asyncio.Task[None] | None = None
@@ -207,7 +230,10 @@ class ChannelBridge:
             )
             return False
         note = ChannelNotification(
-            params=ChannelNotificationParams(content=record["body"], meta=build_meta(record))
+            params=ChannelNotificationParams(
+                content=label(record) if self.labelled else record["body"],
+                meta=build_meta(record),
+            )
         )
         if self._queue.full():
             # Nobody is draining (e.g. the client never finished initialising):

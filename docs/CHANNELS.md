@@ -193,7 +193,7 @@ Each inbound message becomes one `notifications/claude/channel` event:
 
 ```json
 {"jsonrpc": "2.0", "method": "notifications/claude/channel",
- "params": {"content": "please review PR 7",
+ "params": {"content": "alice@xmpp.test (direct): please review PR 7",
             "meta": {"sender": "alice@xmpp.test/laptop", "type": "chat",
                      "reply_to": "alice@xmpp.test/laptop",
                      "sender_jid": "alice@xmpp.test",
@@ -203,8 +203,17 @@ Each inbound message becomes one `notifications/claude/channel` event:
 Claude Code renders that into the session as:
 
 ```text
-<channel source="xmpp" sender="alice@xmpp.test/laptop" type="chat" reply_to="…" …>please review PR 7</channel>
+<channel source="xmpp" sender="alice@xmpp.test/laptop" type="chat" reply_to="…" …>alice@xmpp.test (direct): please review PR 7</channel>
 ```
+
+**The text starts with who sent it and where** (`alice in agents: …`,
+`Reviewer (direct): …`), using the sender's friendly name, else its room
+nick, else its address. People watching the session see only the text: in
+Claude Code's display, and in the app, a pushed message is shown as "Message
+from xmpp" plus its text, with none of the attributes. So without the label
+they couldn't tell a person from an agent, or a room from a direct message.
+The attributes still carry the exact addresses. `XMPP_CHANNEL_LABEL_SENDER=false`
+pushes the bare text.
 
 | `meta` key | When | Meaning |
 |---|---|---|
@@ -722,6 +731,7 @@ cross-host, revoked and plaintext credentials.
 | `XMPP_AGENT_HOST` | | short hostname | Fills `{host}`; advertised to peers |
 | `XMPP_AUTO_JOIN` | `--join` (repeatable) | — | Rooms to join at startup and after reconnects |
 | `XMPP_CHANNEL_ALLOW` | `--allow` (repeatable) | `*@<own domain>` | Sender gate |
+| `XMPP_CHANNEL_LABEL_SENDER` | | `true` | Start pushed text with who sent it and where |
 | `XMPP_REGISTER` | `--register` | `false` | XEP-0077 self-registration |
 
 Flags win over the environment, which wins over `.env`.
