@@ -11,5 +11,13 @@
     "channel",
     "agents",
     "mcp"
-  ]
+  ],
+  "mcpServers": {
+    "xmpp": {
+      "command": "xmpp-mcp",
+      "args": [
+        "--channel"
+      ]
+    }
+  }
 }
