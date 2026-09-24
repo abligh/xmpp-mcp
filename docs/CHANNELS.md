@@ -499,7 +499,11 @@ come and go, and follows a rename. The resolved JID is still checked against
 A name **the caller gave** (explicit or envelope) is also checked when the
 request arrives, so a mistake is an answer rather than a queued message that
 fails later: `404` if no agent in the room holds it, `409` if several do,
-`403` if its holder isn't an allowed target. Until the relay has joined the
+`403` if its holder isn't an allowed target. These answers carry a
+`reason` (`unknown-name`, `ambiguous-name`, `target-not-allowed`,
+`directory-not-ready`, `no-directory`; and `queue-full` for a full queue):
+match on that, not on the text, and not on the status alone. A `404` with
+no `reason` is a path the relay doesn't serve, such as a wrong base URL. Until the relay has joined the
 directory room it answers `503` with `Retry-After`, since "not loaded yet" is
 not "absent": don't treat that as a missing agent. The name is resolved again
 at delivery. Names from the route table or the defaults are checked only at

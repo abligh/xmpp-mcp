@@ -327,7 +327,7 @@ class WebhookRelay:
 
         Resolution is repeated at delivery (the name may move meanwhile), so
         this only turns the knowable failures into an answer the caller can
-        act on: 404 nobody holds it, 409 several do, 403 the holder isn't an
+        act on, with a stable ``reason`` to match on rather than the text: 404 nobody holds it, 409 several do, 403 the holder isn't an
         allowed target, 503 the directory isn't loaded yet (so a caller must
         not read "not found" into it).
         """
@@ -336,22 +336,26 @@ class WebhookRelay:
             return None
         if not self.settings.directory_room:
             return web.json_response(
-                {"error": "friendly-name targets need WEBHOOK_DIRECTORY_ROOM"}, status=400)
+                {"error": "friendly-name targets need WEBHOOK_DIRECTORY_ROOM",
+                 "reason": "no-directory"}, status=400)
         if not self.directory_ready:
             return web.json_response(
-                {"error": "directory room not loaded yet, retry"}, status=503,
+                {"error": "directory room not loaded yet, retry",
+                 "reason": "directory-not-ready"}, status=503,
                 headers={"Retry-After": "5"})
         for target in names:
             try:
                 jid = self.resolve_name(target.jid)
             except NameNotFound as exc:
-                return web.json_response({"error": str(exc)}, status=404)
+                return web.json_response(
+                    {"error": str(exc), "reason": "unknown-name"}, status=404)
             except NameAmbiguous as exc:
-                return web.json_response({"error": str(exc)}, status=409)
+                return web.json_response(
+                    {"error": str(exc), "reason": "ambiguous-name"}, status=409)
             if not target_allowed(jid, self.allowed_targets):
                 return web.json_response(
-                    {"error": f"{target.jid} resolved to {jid}, which is not allowed"},
-                    status=403)
+                    {"error": f"{target.jid} resolved to {jid}, which is not allowed",
+                     "reason": "target-not-allowed"}, status=403)
         return None
 
     async def _deliver(self, item: Outgoing) -> None:
@@ -459,7 +463,8 @@ class WebhookRelay:
             if xml_cost(body) + xml_cost(container) > s.max_message_bytes:
                 container = None
         if self.queue.maxsize - self.queue.qsize() < len(routing.targets):
-            return web.json_response({"error": "queue full, retry later"}, status=503)
+            return web.json_response(
+                {"error": "queue full, retry later", "reason": "queue-full"}, status=503)
         # Only now is the delivery accepted, so only now is its ID "seen":
         # recorded earlier, a refused request's retry would be answered
         # "duplicate" and taken for a success.

@@ -331,6 +331,7 @@ async def test_an_unknown_name_is_refused_not_queued() -> None:
     _ready(relay)
     status, got = await _post(relay, "/agent/Nobody", data="wake up")
     assert status == 404 and "no agent named 'Nobody'" in got["error"]
+    assert got["reason"] == "unknown-name"  # what a caller matches on
     assert relay.queue.empty()
 
 
@@ -339,8 +340,8 @@ async def test_an_ambiguous_name_is_a_conflict() -> None:
     _ready(relay)
     _occupant(relay, "Reviewer", "Reviewer", "a", "a@xmpp.test/x")
     _occupant(relay, "Reviewer (host2)", "Reviewer", "b", "b@xmpp.test/y")
-    status, _ = await _post(relay, "/agent/Reviewer", data="x")
-    assert status == 409 and relay.queue.empty()
+    status, got = await _post(relay, "/agent/Reviewer", data="x")
+    assert status == 409 and got["reason"] == "ambiguous-name" and relay.queue.empty()
 
 
 async def test_before_the_directory_loads_the_answer_is_retry_not_absent() -> None:
@@ -376,7 +377,7 @@ async def test_a_name_resolving_outside_the_allow_list_is_refused_up_front() -> 
     _ready(relay)
     _occupant(relay, "Reviewer", "Reviewer", "sess-r", "sess-r@xmpp.test/x")
     status, got = await _post(relay, "/agent/Reviewer", data="x")
-    assert status == 403 and "not allowed" in got["error"]
+    assert status == 403 and got["reason"] == "target-not-allowed"
 
 
 async def test_names_from_the_route_table_still_fail_at_delivery(tmp_path: Path) -> None:
@@ -457,3 +458,15 @@ async def test_a_name_refused_up_front_does_not_use_up_its_delivery_id() -> None
     _occupant(relay, "Reviewer", "Reviewer", "sess-r", "sess-r@xmpp.test/x")
     status, got = await _post(relay, "/agent/Reviewer", data="x", headers=headers)
     assert status == 200 and got["status"] == "queued"
+
+
+async def test_a_404_for_a_path_the_relay_has_no_route_for_has_no_reason() -> None:
+    """Callers tell "nobody has that name" from "wrong URL" by `reason`."""
+    relay = _relay(directory_room=ROOM)
+    _ready(relay)
+    client = await _client(relay)
+    try:
+        resp = await client.post("/prefix/agent/Reviewer", data="x")
+        assert resp.status == 404 and resp.content_type != "application/json"
+    finally:
+        await client.close()
