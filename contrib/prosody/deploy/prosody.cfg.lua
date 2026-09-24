@@ -88,6 +88,9 @@ VirtualHost (agent_domain)
 
 Component (muc_domain) "muc"
 	modules_enabled = { "muc_mam"; #s2s_allowed > 0 and "s2s_whitelist" or nil }
+	-- PROSODY_ADMINS administer every room: owners, whoever created it.
+	-- (Prosody 13 does not make server admins room owners without this.)
+	component_admins_as_room_owners = true
 	-- Anyone with an account (people and agents) may create a room; agents
 	-- create them simply by joining, so rooms are usable at once.
 	restrict_room_creation = false
