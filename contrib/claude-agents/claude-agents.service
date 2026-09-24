@@ -1,0 +1,31 @@
+# The claude-agents supervisor: one long-lived Claude Code agent per directory
+# in AGENTS_ROOT (see ~/.config/claude-agents/config.env), each an interactive
+# Remote Control session with the XMPP channel, in the supervisor's tmux server
+# (`claude-agents attach NAME`).
+#
+# Install: copy to /etc/systemd/system/, adjust User= and the paths, then
+#   systemctl daemon-reload && systemctl enable --now claude-agents
+#
+# Stopping it asks every agent to exit cleanly (Ctrl-C twice) and waits; each
+# resumes its conversation when the supervisor next starts.
+
+[Unit]
+Description=Claude Code agents (one per directory; Remote Control + XMPP channel)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=claude
+Environment=HOME=/home/claude
+Environment=PATH=/home/claude/.local/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=/home/claude/.local/bin/claude-agents run
+# SIGTERM to the supervisor first (it stops the agents cleanly), then SIGKILL
+# whatever is left in the unit once TimeoutStopSec runs out.
+KillMode=mixed
+TimeoutStopSec=60
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,468 @@
+#!/usr/bin/env python3
+"""claude-agents — run every directory under AGENTS_ROOT as a long-lived Claude Code agent.
+
+Each agent is an interactive ``claude --remote-control NAME`` session (so
+claude.ai and the Claude app can reach it) listening on the XMPP channel, in
+its own window of one tmux server, and resumed into the same conversation
+whenever it starts or restarts.
+
+Nothing names an agent but its directory:
+
+* An agent is a directory in AGENTS_ROOT, or a symlink there to a directory
+  anywhere (a repository worktree, say). Its name is the entry's name. Make
+  one to add an agent; remove it to retire the agent.
+* Its conversation is found, not configured: the one this supervisor last ran
+  there, else the newest Claude Code keeps for that directory.
+* ``claude-agents fork PARENT CHILD`` makes a new agent that starts from a copy
+  of PARENT's conversation. ``--fork-session`` gives it a session of its own,
+  so it gets its own claude.ai session and XMPP address.
+
+The only record this program keeps is its own, in ~/.local/state/claude-agents/:
+which session it last ran for each agent, and a fork still to be started.
+
+Commands::
+
+    claude-agents run                       the supervisor (systemd runs this)
+    claude-agents list                      agents, their state and claude.ai links
+    claude-agents attach NAME               the agent's terminal (tmux; detach: C-b d)
+    claude-agents new NAME [--dir PATH]     add an agent (PATH: symlink to it)
+    claude-agents fork PARENT CHILD [--dir PATH]
+    claude-agents restart NAME              stop it cleanly; the supervisor resumes it
+
+Settings: ~/.config/claude-agents/config.env (see config.example.env).
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import re
+import shlex
+import shutil
+import signal
+import subprocess
+import sys
+import time
+from dataclasses import dataclass, field
+from pathlib import Path
+
+SOCKET = "claude-agents"
+NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+LINK_RE = re.compile(r"https://claude\.ai/code/session_[A-Za-z0-9]+")
+QUICK_EXIT_S = 60  # an agent that dies sooner than this counts as failing to start
+
+
+def _home() -> Path:
+    return Path(os.environ.get("HOME", "~")).expanduser()
+
+
+def claude_home() -> Path:
+    return Path(os.environ.get("CLAUDE_CONFIG_DIR", _home() / ".claude"))
+
+
+def state_dir() -> Path:
+    return Path(os.environ.get("CLAUDE_AGENTS_STATE", _home() / ".local/state/claude-agents"))
+
+
+def config_path() -> Path:
+    return Path(os.environ.get("CLAUDE_AGENTS_CONFIG", _home() / ".config/claude-agents/config.env"))
+
+
+def log(msg: str) -> None:
+    print(f"claude-agents: {msg}", flush=True)
+
+
+# --- configuration ------------------------------------------------------------
+
+
+@dataclass
+class Config:
+    root: Path
+    claude: str = "claude"
+    channel: str = "plugin:xmpp@xmpp-mcp"
+    extra_args: list[str] = field(default_factory=list)
+    poll: float = 5.0
+    session_env: dict[str, str] = field(default_factory=dict)
+
+    @property
+    def plugin(self) -> str | None:
+        """The plugin to enable for agents, from a ``plugin:NAME@MARKET`` channel."""
+        return self.channel.split(":", 1)[1] if self.channel.startswith("plugin:") else None
+
+
+def load_config(path: Path | None = None) -> Config:
+    """KEY=VALUE lines. AGENTS_* configure this program; everything else is
+    passed to each agent's environment (XMPP_*, and anything else you add)."""
+    values: dict[str, str] = {}
+    path = path or config_path()
+    if path.exists():
+        for line in path.read_text().splitlines():
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, _, value = line.partition("=")
+            value = value.strip()
+            if len(value) >= 2 and value[0] == value[-1] and value[0] in "'\"":
+                value = value[1:-1]
+            values[key.strip()] = value
+    own = {k: values.pop(k) for k in list(values) if k.startswith("AGENTS_")}
+    return Config(
+        root=Path(own.get("AGENTS_ROOT", "~/agents")).expanduser(),
+        claude=own.get("AGENTS_CLAUDE", "claude"),
+        channel=own.get("AGENTS_CHANNEL", "plugin:xmpp@xmpp-mcp"),
+        extra_args=shlex.split(own.get("AGENTS_CLAUDE_ARGS", "")),
+        poll=float(own.get("AGENTS_POLL", "5")),
+        session_env=values,
+    )
+
+
+# --- agents and their conversations ------------------------------------------------
+
+
+@dataclass
+class Agent:
+    name: str
+    entry: Path   # the entry in AGENTS_ROOT
+    real: Path    # the directory Claude Code runs in (symlinks resolved)
+
+
+def list_agents(root: Path) -> list[Agent]:
+    agents = []
+    if not root.is_dir():
+        return agents
+    for entry in sorted(root.iterdir()):
+        if entry.name.startswith(".") or not NAME_RE.match(entry.name) or not entry.is_dir():
+            continue
+        agents.append(Agent(entry.name, entry, entry.resolve()))
+    return agents
+
+
+def slug(path: Path | str) -> str:
+    """How Claude Code names a directory's folder under ~/.claude/projects."""
+    return re.sub(r"[^A-Za-z0-9]", "-", str(path))
+
+
+def project_dir(real: Path) -> Path:
+    return claude_home() / "projects" / slug(real)
+
+
+def has_transcript(real: Path, session: str | None) -> bool:
+    return bool(session) and (project_dir(real) / f"{session}.jsonl").is_file()
+
+
+def newest_session(real: Path) -> str | None:
+    files = sorted(project_dir(real).glob("*.jsonl"), key=lambda p: p.stat().st_mtime)
+    return files[-1].stem if files else None
+
+
+def load_state(name: str) -> dict:
+    try:
+        return json.loads((state_dir() / "agents" / f"{name}.json").read_text())
+    except (OSError, ValueError):
+        return {}
+
+
+def save_state(name: str, state: dict) -> None:
+    d = state_dir() / "agents"
+    d.mkdir(parents=True, exist_ok=True)
+    tmp = d / f".{name}.json.tmp"
+    tmp.write_text(json.dumps(state, indent=2) + "\n")
+    tmp.replace(d / f"{name}.json")
+
+
+def session_to_resume(agent: Agent, state: dict) -> str | None:
+    """The conversation to resume: ours if it still exists, else the newest there."""
+    if has_transcript(agent.real, state.get("session")):
+        return state["session"]
+    return newest_session(agent.real)
+
+
+def claude_args(agent: Agent, cfg: Config, state: dict) -> list[str]:
+    args = [cfg.claude, "--remote-control", agent.name, "--name", agent.name,
+            "--channels", cfg.channel]
+    if cfg.plugin:
+        # Enabled for agents only, not for every Claude session on the machine.
+        args += ["--settings", json.dumps({"enabledPlugins": {cfg.plugin: True}})]
+    if state.get("fork_from"):
+        args += ["--resume", state["fork_from"], "--fork-session"]
+    else:
+        session = session_to_resume(agent, state)
+        if session:
+            args += ["--resume", session]
+    return args + cfg.extra_args
+
+
+def live_session(pid: int) -> str | None:
+    """The session ID Claude Code (running as ``pid``) has registered, if any."""
+    try:
+        return json.loads((claude_home() / "sessions" / f"{pid}.json").read_text())["sessionId"]
+    except (OSError, ValueError, KeyError):
+        return None
+
+
+# --- tmux ---------------------------------------------------------------------------
+
+
+def tmux(*args: str) -> subprocess.CompletedProcess:
+    conf = state_dir() / "tmux.conf"
+    return subprocess.run(["tmux", "-L", SOCKET, "-f", str(conf), *args],
+                          capture_output=True, text=True)
+
+
+def write_tmux_conf() -> None:
+    state_dir().mkdir(parents=True, exist_ok=True)
+    (state_dir() / "tmux.conf").write_text(
+        "# Written by claude-agents.\n"
+        "set -g remain-on-exit on\n"      # keep a dead pane, so its exit is seen
+        "set -g history-limit 50000\n"
+    )
+
+
+@dataclass
+class Pane:
+    dead: bool
+    pid: int
+    status: str
+
+
+def pane(name: str) -> Pane | None:
+    r = tmux("list-panes", "-t", f"={name}:", "-F",
+             "#{pane_dead} #{pane_pid} #{pane_dead_status}:#{pane_dead_signal}")
+    if r.returncode != 0 or not r.stdout.strip():
+        return None
+    dead, pid, how = (r.stdout.split() + ["", "", ":"])[:3]
+    status, _, sig = how.partition(":")
+    return Pane(dead == "1", int(pid), f"signal {sig}" if sig else f"status {status or '?'}")
+
+
+def tmux_sessions() -> set[str]:
+    r = tmux("list-sessions", "-F", "#{session_name}")
+    return set(r.stdout.split()) if r.returncode == 0 else set()
+
+
+def start(agent: Agent, cfg: Config, state: dict) -> None:
+    env = [x for k, v in cfg.session_env.items() for x in ("-e", f"{k}={v}")]
+    args = claude_args(agent, cfg, state)
+    if pane(agent.name) is not None:
+        r = tmux("respawn-pane", "-k", "-t", f"={agent.name}:", "-c", str(agent.real), *env, *args)
+    else:
+        r = tmux("new-session", "-d", "-s", agent.name, "-x", "220", "-y", "50",
+                 "-c", str(agent.real), *env, *args)
+    if r.returncode != 0:
+        raise RuntimeError(r.stderr.strip() or f"tmux exited {r.returncode}")
+    how = ("forking " + state["fork_from"]) if state.get("fork_from") else (
+        ("resuming " + args[args.index("--resume") + 1]) if "--resume" in args else "new conversation")
+    log(f"{agent.name}: started in {agent.real} ({how})")
+
+
+def stop(*names: str, wait: float = 20.0) -> None:
+    """Claude Code's own clean exit (Ctrl-C twice) for each, together; then
+    remove their tmux sessions."""
+    running = [n for n in names if (p := pane(n)) and not p.dead]
+    for key_press in (1, 2):
+        for n in running:
+            tmux("send-keys", "-t", f"={n}:", "C-c")
+        time.sleep(1)
+    deadline = time.monotonic() + wait
+    while time.monotonic() < deadline and any((p := pane(n)) and not p.dead for n in running):
+        time.sleep(0.5)
+    for n in names:
+        tmux("kill-session", "-t", f"={n}")
+
+
+# --- the supervisor -----------------------------------------------------------------
+
+
+class Supervisor:
+    def __init__(self, cfg: Config) -> None:
+        self.cfg = cfg
+        self.started_at: dict[str, float] = {}
+        self.not_before: dict[str, float] = {}
+        self.failures: dict[str, int] = {}
+        self.stopping = False
+
+    def tick(self) -> None:
+        agents = {a.name: a for a in list_agents(self.cfg.root)}
+        gone = tmux_sessions() - set(agents)
+        if gone:
+            log(f"{', '.join(sorted(gone))}: directory gone; stopping")
+            stop(*gone)
+        now = time.monotonic()
+        for name, agent in agents.items():
+            state = load_state(name)
+            p = pane(name)
+            if p and not p.dead:
+                self._record_session(agent, p, state)
+                continue
+            if p and p.dead and name in self.started_at:
+                quick = now - self.started_at.pop(name) < QUICK_EXIT_S
+                self.failures[name] = self.failures.get(name, 0) + 1 if quick else 0
+                delay = min(300.0, 10.0 * 2 ** (self.failures[name] - 1)) if quick else 5.0
+                self.not_before[name] = now + delay
+                log(f"{name}: exited ({p.status}); restarting in {delay:.0f}s")
+            if now < self.not_before.get(name, 0):
+                continue
+            try:
+                start(agent, self.cfg, state)
+                self.started_at[name] = now
+            except (RuntimeError, OSError) as exc:
+                log(f"{name}: could not start: {exc}")
+                self.not_before[name] = now + 60
+
+    def _record_session(self, agent: Agent, p: Pane, state: dict) -> None:
+        """Remember the running conversation, once it exists on disk."""
+        session = live_session(p.pid)
+        if session and session != state.get("session") and has_transcript(agent.real, session):
+            state = {k: v for k, v in state.items() if k != "fork_from"}
+            state["session"] = session
+            save_state(agent.name, state)
+            log(f"{agent.name}: conversation {session}")
+
+    def run(self) -> None:
+        write_tmux_conf()
+        self.cfg.root.mkdir(parents=True, exist_ok=True)
+        for sig in (signal.SIGTERM, signal.SIGINT):
+            signal.signal(sig, lambda *_: setattr(self, "stopping", True))
+        log(f"supervising {self.cfg.root}")
+        while not self.stopping:
+            try:
+                self.tick()
+            except Exception as exc:  # noqa: BLE001 - keep supervising
+                log(f"tick failed: {exc!r}")
+            end = time.monotonic() + self.cfg.poll
+            while not self.stopping and time.monotonic() < end:
+                time.sleep(0.2)
+        log("stopping every agent")
+        stop(*tmux_sessions())
+        tmux("kill-server")
+
+
+# --- commands -------------------------------------------------------------------------
+
+
+def _agent(cfg: Config, name: str) -> Agent:
+    for a in list_agents(cfg.root):
+        if a.name == name:
+            return a
+    sys.exit(f"claude-agents: no agent {name!r} in {cfg.root}")
+
+
+def _new_entry(cfg: Config, name: str, target: str | None) -> Path:
+    if not NAME_RE.match(name):
+        sys.exit(f"claude-agents: {name!r} is not a usable name (letters, digits, . _ -)")
+    entry = cfg.root / name
+    if entry.exists() or entry.is_symlink():
+        sys.exit(f"claude-agents: {entry} already exists")
+    cfg.root.mkdir(parents=True, exist_ok=True)
+    if target:
+        real = Path(target).expanduser().resolve()
+        if not real.is_dir():
+            sys.exit(f"claude-agents: {real} is not a directory")
+        entry.symlink_to(real)
+    else:
+        entry.mkdir()
+    return entry
+
+
+def cmd_list(cfg: Config, _args) -> None:
+    agents = list_agents(cfg.root)
+    if not agents:
+        print(f"No agents in {cfg.root}.")
+        return
+    for a in agents:
+        p, state = pane(a.name), load_state(a.name)
+        status = "not running" if p is None else ("exited" if p.dead else "running")
+        session = (live_session(p.pid) if p and not p.dead else None) or state.get("session") or "-"
+        link = ""
+        if p:
+            links = LINK_RE.findall(tmux("capture-pane", "-p", "-S", "-5000", "-t", f"={a.name}:").stdout)
+            link = links[-1] if links else ""
+        where = f"{a.entry} -> {a.real}" if a.entry.is_symlink() else str(a.real)
+        print(f"{a.name:20} {status:12} {session:38} {link}\n{'':20} {where}")
+
+
+def cmd_attach(cfg: Config, args) -> None:
+    _agent(cfg, args.name)
+    os.execvp("tmux", ["tmux", "-L", SOCKET, "attach", "-t", f"={args.name}"])
+
+
+def cmd_new(cfg: Config, args) -> None:
+    entry = _new_entry(cfg, args.name, args.dir)
+    print(f"Added {args.name} ({entry.resolve()}); the supervisor starts it within "
+          f"{cfg.poll:.0f}s: `claude-agents list`.")
+
+
+def prepare_fork(cfg: Config, parent: Agent, child_name: str, target: str | None) -> Agent:
+    """Make CHILD's directory and give it a copy of PARENT's conversation to fork."""
+    p = pane(parent.name)
+    session = (live_session(p.pid) if p and not p.dead else None) or session_to_resume(
+        parent, load_state(parent.name))
+    if not has_transcript(parent.real, session):
+        sys.exit(f"claude-agents: {parent.name} has no conversation to fork yet")
+    if target is None and _git_toplevel(parent.real):
+        # A worktree of the parent's repository, on a branch named after the child.
+        entry = cfg.root / child_name
+        if not NAME_RE.match(child_name) or entry.exists() or entry.is_symlink():
+            sys.exit(f"claude-agents: cannot create {entry}")
+        r = subprocess.run(["git", "-C", str(parent.real), "worktree", "add", "-b", child_name,
+                            str(entry)], capture_output=True, text=True)
+        if r.returncode != 0:
+            sys.exit(f"claude-agents: git worktree add failed: {r.stderr.strip()}")
+    else:
+        entry = _new_entry(cfg, child_name, target)
+    child = Agent(child_name, entry, entry.resolve())
+    # --resume looks the conversation up by directory, so it must be filed
+    # under the child's. The copy is a snapshot: the parent carries on.
+    src, dst = project_dir(parent.real), project_dir(child.real)
+    dst.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(src / f"{session}.jsonl", dst / f"{session}.jsonl")
+    if (src / session).is_dir():
+        shutil.copytree(src / session, dst / session, dirs_exist_ok=True)
+    save_state(child_name, {"fork_from": session, "forked_from_agent": parent.name})
+    return child
+
+
+def _git_toplevel(path: Path) -> str | None:
+    r = subprocess.run(["git", "-C", str(path), "rev-parse", "--show-toplevel"],
+                       capture_output=True, text=True)
+    return r.stdout.strip() if r.returncode == 0 else None
+
+
+def cmd_fork(cfg: Config, args) -> None:
+    child = prepare_fork(cfg, _agent(cfg, args.parent), args.child, args.dir)
+    print(f"Forked {args.parent} into {args.child} ({child.real}); the supervisor starts it "
+          f"within {cfg.poll:.0f}s, from a copy of {args.parent}'s conversation.")
+
+
+def cmd_restart(cfg: Config, args) -> None:
+    _agent(cfg, args.name)
+    stop(args.name)
+    print(f"Stopped {args.name}; the supervisor resumes it within {cfg.poll:.0f}s.")
+
+
+def main(argv: list[str] | None = None) -> None:
+    ap = argparse.ArgumentParser(prog="claude-agents", description=__doc__.split("\n\n")[0])
+    sub = ap.add_subparsers(dest="cmd", required=True)
+    sub.add_parser("run")
+    sub.add_parser("list")
+    for name in ("attach", "restart"):
+        sub.add_parser(name).add_argument("name")
+    p = sub.add_parser("new")
+    p.add_argument("name")
+    p.add_argument("--dir")
+    p = sub.add_parser("fork")
+    p.add_argument("parent")
+    p.add_argument("child")
+    p.add_argument("--dir")
+    args = ap.parse_args(argv)
+    cfg = load_config()
+    if args.cmd == "run":
+        Supervisor(cfg).run()
+    else:
+        {"list": cmd_list, "attach": cmd_attach, "new": cmd_new, "fork": cmd_fork,
+         "restart": cmd_restart}[args.cmd](cfg, args)
+
+
+if __name__ == "__main__":
+    main()

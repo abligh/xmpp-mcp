@@ -105,9 +105,51 @@ Claude Code shows a warning dialog listing the development channels. Choose
 **I am using this for local development**. Below the banner you should then see
 `Channels (experimental) messages from server:xmpp inject directly in this session`.
 
+### Plugin: the channel without the development flag
+
+The repository is also a plugin marketplace (`.claude-plugin/`) with one
+plugin, `xmpp`, whose server is the installed `xmpp-mcp` in channel mode
+(settings from the environment). A plugin can be put on the approved channel
+list, and then sessions load it with `--channels`: no warning dialog, which
+matters for anything restarted unattended.
+
+```bash
+uv tool install "xmpp-mcp[webhook] @ git+https://github.com/abligh/xmpp-mcp@xmpp-channels"
+git clone --branch xmpp-channels https://github.com/abligh/xmpp-mcp.git ~/.local/share/xmpp-mcp-src
+claude plugin marketplace add ~/.local/share/xmpp-mcp-src
+claude plugin install xmpp@xmpp-mcp --scope local     # installs it; enable it where wanted
+```
+
+and in `/etc/claude-code/managed-settings.json`:
+
+```json
+{ "channelsEnabled": true,
+  "allowedChannelPlugins": [ { "plugin": "xmpp", "marketplace": "xmpp-mcp" } ] }
+```
+
+(this replaces Claude Code's built-in approved list, so add any official
+channel plugins you also use). Then:
+
+```bash
+claude --remote-control Reviewer --name Reviewer --channels plugin:xmpp@xmpp-mcp \
+  --settings '{"enabledPlugins": {"xmpp@xmpp-mcp": true}}'
+```
+
+Without the managed setting the channel is refused ("not on the approved
+channels allowlist") and nothing is pushed.
+
+**Remote Control.** The interactive `claude --remote-control NAME` takes
+`--channels` like any session, and stays reachable from claude.ai and the
+app. The `claude remote-control` *server* does not: it rejects `--channels`
+and cannot pass it to the sessions it spawns (Claude Code 2.1.281), so its
+sessions can use the tools but receive no pushes.
+
 **Headless / always-on agents.** Events only arrive while the session is
 open, so run the agent in a persistent process: a tmux/screen pane,
-a systemd unit, or a container's main process.
+a systemd unit, or a container's main process. For a fleet,
+[`contrib/claude-agents/`](../contrib/claude-agents/README.md) runs one
+Remote Control + channel agent per directory under systemd, resuming each
+conversation across restarts, with nothing to record per agent.
 
 ```bash
 # One long-lived agent per tmux window

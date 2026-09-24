@@ -86,6 +86,7 @@ tests/                   # unit tests (no network)
   test_claude_session.py     # session discovery/watching, renames, addressing
   test_muc_client.py         # MUC bookkeeping: nicks, room keys, occupants
   test_credentials.py        # derivation (pinned bytes), key files, CLI
+  test_claude_agents.py      # contrib/claude-agents: discovery, resume, fork
   test_xmpp_client.py        # opt-in `integration` marker, needs live server
 
 tests/integration/       # docker-based E2E (two labs available — see below)
@@ -137,6 +138,13 @@ tests/integration/       # docker-based E2E (two labs available — see below)
   test_prosody_auth_e2e.py       # 12 tests — attacks the Prosody lab's auth
                                  #   directly (forged / expired / cross-host /
                                  #   revoked / plaintext); skipped on ejabberd
+
+.claude-plugin/          # plugin marketplace: one plugin, xmpp (./plugin), so
+plugin/                  #   the channel can be approved (--channels
+                         #   plugin:xmpp@xmpp-mcp) instead of the dev flag
+contrib/claude-agents/   # supervisor: one Remote Control + channel agent per
+                         #   directory, in tmux, under systemd; resumes each
+                         #   conversation; fork; nothing recorded per agent
 
 contrib/prosody/         # optional: mod_auth_xmpp_mcp.lua (server half of
                          #   credentials.py) + README — deployment material,
