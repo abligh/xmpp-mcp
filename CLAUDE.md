@@ -536,6 +536,13 @@ Channel/agent mode adds `XMPP_CHANNEL`, `XMPP_AGENT_NAME`, `XMPP_AGENT_ID`,
     will never log in. `mod_auth_xmpp_mcp` only says yes for JIDs that have
     logged in (a `xmpp_mcp_seen` store); anything else bounces with
     `service-unavailable`.
+47. **`connection_failed` fires per attempt, too** (like `failed_auth`, #17).
+    Without a pinned host slixmpp works through SRV records — or, with none,
+    probes the domain with direct TLS on 5222 and *then* STARTTLS. Treating
+    the first failure as final (the direct-TLS probe's `WRONG_VERSION_NUMBER`)
+    meant no agent could reach a server by its domain alone; every lab pinned
+    `XMPP_HOST`, so only a real deployment showed it. Fail fast only when the
+    host is pinned; otherwise let the start timeout report the last error.
 
 ## Test markers
 

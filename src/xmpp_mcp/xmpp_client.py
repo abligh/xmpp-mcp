@@ -145,6 +145,7 @@ class XMPPClient:
         self.xmpp = ClientXMPP(settings.xmpp_jid, settings.xmpp_password or "")
         # Constructed inside the FastMCP lifespan, so a loop is always running.
         self._ready: asyncio.Future[bool] = asyncio.get_running_loop().create_future()
+        self._last_connect_error: Any = None
         self._inbox: deque[dict[str, Any]] = deque(maxlen=settings.xmpp_inbox_size)
         self._joined_rooms: dict[str, str] = {}  # room bare JID -> nick in use
         # Every room this client has ever joined, including ones it has since
@@ -317,8 +318,10 @@ class XMPPClient:
         try:
             await asyncio.wait_for(self._ready, timeout=s.xmpp_connect_timeout)
         except asyncio.TimeoutError as exc:
+            last = self._last_connect_error
             raise XMPPError(
                 f"Timed out after {s.xmpp_connect_timeout}s establishing the XMPP session"
+                + (f" (last connection error: {last})" if last is not None else "")
             ) from exc
         logger.info("XMPP session established as %s", self.xmpp.boundjid.full)
         session = s.claude_session
@@ -619,7 +622,14 @@ class XMPPClient:
             )
 
     def _on_connection_failed(self, reason: Any) -> None:
-        if not self._ready.done():
+        # slixmpp fires this once per *attempt*, not once overall (compare
+        # failed_auth, gotcha #17). Without a pinned host it works through SRV
+        # records, or with none, probes the domain with direct TLS and then
+        # STARTTLS — so the first failure is routinely followed by a success.
+        # Only a pinned host means a single attempt, worth failing fast on.
+        self._last_connect_error = reason
+        logger.debug("XMPP connection attempt failed: %s", reason)
+        if self._settings.xmpp_host and not self._ready.done():
             self._ready.set_exception(XMPPError(f"Connection failed: {reason}"))
 
     def add_message_listener(self, listener: MessageListener) -> None:

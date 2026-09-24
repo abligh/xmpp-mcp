@@ -14,7 +14,7 @@ import pytest
 from slixmpp import JID
 
 from xmpp_mcp.config import Settings
-from xmpp_mcp.xmpp_client import XMPPClient
+from xmpp_mcp.xmpp_client import XMPPClient, XMPPError
 
 ROOM = "agents@conference.xmpp.test"
 
@@ -126,6 +126,40 @@ async def test_room_jids_are_canonicalised_everywhere(
     assert c.room_occupants(mixed) == []
     c.leave_room(mixed)
     assert not c.is_joined(mixed)
+
+
+async def test_a_failed_attempt_is_not_final_without_a_pinned_host(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """slixmpp fires connection_failed per attempt, not once overall.
+
+    With no pinned host and no SRV records it probes the domain with direct TLS
+    on 5222 first, then STARTTLS; giving up on the first failure meant no agent
+    could reach a server by its domain alone.
+    """
+    c = _client()
+
+    def connect() -> None:
+        c._on_connection_failed("[SSL: WRONG_VERSION_NUMBER]")  # the direct-TLS probe
+        c._ready.set_result(True)  # ... then STARTTLS succeeds
+
+    monkeypatch.setattr(c, "_connect", connect)
+    await c.start()
+
+
+async def test_a_pinned_host_fails_fast(monkeypatch: pytest.MonkeyPatch) -> None:
+    """With XMPP_HOST there is one attempt per round: its failure is the answer."""
+    c = _client(xmpp_host="127.0.0.1")
+    monkeypatch.setattr(c, "_connect", lambda: c._on_connection_failed("refused"))
+    with pytest.raises(XMPPError, match="Connection failed: refused"):
+        await c.start()
+
+
+async def test_a_timeout_names_the_last_connection_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    c = _client(xmpp_connect_timeout=0.2)
+    monkeypatch.setattr(c, "_connect", lambda: c._on_connection_failed("no route to host"))
+    with pytest.raises(XMPPError, match="last connection error: no route to host"):
+        await c.start()
 
 
 async def test_disconnect_after_a_start_timeout_is_quiet() -> None:
