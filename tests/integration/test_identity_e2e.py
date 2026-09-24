@@ -115,7 +115,9 @@ async def test_people_see_the_name_in_the_agents_vcard(spawn_agent, lab: LabHand
 
         async def vcard4_nick():
             try:
-                iq = await alice._client.plugin["xep_0292"].retrieve_vcard(agent.jid)
+                # The node XEP-0292 names, not slixmpp's default (its namespace).
+                iq = await alice._client.plugin["xep_0060"].get_item(
+                    agent.jid, "urn:xmpp:vcard4", "current")
             except Exception:  # noqa: BLE001 - not published yet
                 return None
             el = iq.xml.find(f".//{VC4}nickname/{VC4}text")
@@ -126,6 +128,7 @@ async def test_people_see_the_name_in_the_agents_vcard(spawn_agent, lab: LabHand
             # mod_vcard_legacy answers the old vcard-temp request from it.
             iq = await alice._client.plugin["xep_0054"].get_vcard(agent.jid)
             assert iq["vcard_temp"]["NICKNAME"] in ("Reviewer", ["Reviewer"])
+            assert iq["vcard_temp"]["FN"] == "Reviewer"  # only from the vCard4
 
         _rename(agent.session_file, "Critic", "user")
 

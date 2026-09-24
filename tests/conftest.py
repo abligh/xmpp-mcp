@@ -14,6 +14,12 @@ def _no_ambient_claude_session(monkeypatch: pytest.MonkeyPatch) -> None:
     into every Settings() a test builds. Tests that want a session say so
     explicitly (``xmpp_claude_session=<path>``).
     """
+    # An agent's own settings are in its environment too (a supervisor puts
+    # them there): don't let them configure the tests.
+    import os
+    for name in list(os.environ):
+        if name.startswith(("XMPP_", "WEBHOOK_", "OPENFIRE_")):
+            monkeypatch.delenv(name)
     monkeypatch.setenv("XMPP_CLAUDE_SESSION", "off")
     monkeypatch.delenv("CLAUDE_CODE_SESSION_ID", raising=False)
 

@@ -105,6 +105,9 @@ def _describe(exc: BaseException) -> str:
     return text or type(exc).__name__
 
 
+VCARD4_NODE = "urn:xmpp:vcard4"  # XEP-0292 §3
+
+
 def _open_access_form(xmpp: Any) -> Any:
     """XEP-0060 §7.1.5 publish-options: make a PEP node readable by anyone."""
     form = xmpp.plugin["xep_0004"].make_form(ftype="submit")
@@ -531,8 +534,10 @@ class XMPPClient:
             ("XEP-0172 nickname",
              lambda **kw: self.xmpp.plugin["xep_0172"].publish_nick(name, **kw)),
             ("vCard",
+             # slixmpp would publish to the payload's namespace; XEP-0292
+             # (and Prosody) use urn:xmpp:vcard4.
              lambda **kw: self.xmpp.plugin["xep_0292"].publish_vcard(
-                 full_name=name, nickname=name, **kw)),
+                 full_name=name, nickname=name, node=VCARD4_NODE, **kw)),
         ):
             try:
                 try:
