@@ -224,8 +224,12 @@ async def test_list_rooms_and_members(spawn_agent, lab: LabHandle) -> None:
     rev = await spawn_agent("rev", "--join", room, claude_name="Reviewer")
     bld = await spawn_agent("bld", claude_name="Builder")  # not in the room
 
+    # Ask for the tool's maximum: a long-lived lab accumulates rooms, and the
+    # default of 50 (alphabetical) may leave a fresh random one out.
+    everything = {"limit": 500}
+
     async def listed():
-        rooms = {r["room"]: r for r in (await bld.call("list_rooms"))["rooms"]}
+        rooms = {r["room"]: r for r in (await bld.call("list_rooms", everything))["rooms"]}
         return rooms.get(room)
 
     entry = await _until(listed)
@@ -250,9 +254,9 @@ async def test_list_rooms_and_members(spawn_agent, lab: LabHandle) -> None:
     assert by_nick["Reviewer"]["jid"].startswith(rev.jid + "/")
     assert (by_nick["Reviewer"]["name"], by_nick["Reviewer"]["agent_id"]) == (
         "Reviewer", rev.jid.split(".")[0])
-    rooms = {r["room"]: r for r in (await bld.call("list_rooms"))["rooms"]}
+    rooms = {r["room"]: r for r in (await bld.call("list_rooms", everything))["rooms"]}
     assert rooms[room]["joined"] is True and rooms[room]["nick"] == "Builder"
 
     await bld.call("leave_room", {"room_jid": room})
-    after = {r["room"]: r for r in (await bld.call("list_rooms"))["rooms"]}
+    after = {r["room"]: r for r in (await bld.call("list_rooms", everything))["rooms"]}
     assert after[room]["joined"] is False
