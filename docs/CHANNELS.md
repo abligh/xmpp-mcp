@@ -147,9 +147,10 @@ sessions can use the tools but receive no pushes.
 **Headless / always-on agents.** Events only arrive while the session is
 open, so run the agent in a persistent process: a tmux/screen pane,
 a systemd unit, or a container's main process. For a fleet,
-[`contrib/claude-agents/`](../contrib/claude-agents/README.md) runs one
-Remote Control + channel agent per directory under systemd, resuming each
-conversation across restarts, with nothing to record per agent.
+[claude-agent-supervisor](https://github.com/abligh/claude-agent-supervisor)
+runs one Remote Control agent per directory under systemd, with any channels
+(`AGENTS_CHANNELS=plugin:xmpp@xmpp-mcp`), resuming each conversation across
+restarts, with nothing to record per agent.
 
 ```bash
 # One long-lived agent per tmux window

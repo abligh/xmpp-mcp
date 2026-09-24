@@ -86,7 +86,6 @@ tests/                   # unit tests (no network)
   test_claude_session.py     # session discovery/watching, renames, addressing
   test_muc_client.py         # MUC bookkeeping: nicks, room keys, occupants
   test_credentials.py        # derivation (pinned bytes), key files, CLI
-  test_claude_agents.py      # contrib/claude-agents: discovery, resume, fork
   test_xmpp_client.py        # opt-in `integration` marker, needs live server
 
 tests/integration/       # docker-based E2E (two labs available — see below)
@@ -142,9 +141,8 @@ tests/integration/       # docker-based E2E (two labs available — see below)
 .claude-plugin/          # plugin marketplace: one plugin, xmpp (./plugin), so
 plugin/                  #   the channel can be approved (--channels
                          #   plugin:xmpp@xmpp-mcp) instead of the dev flag
-contrib/claude-agents/   # supervisor: one Remote Control + channel agent per
-                         #   directory, in tmux, under systemd; resumes each
-                         #   conversation; fork; nothing recorded per agent
+                         # (the long-lived-agent supervisor that uses it is its
+                         #   own repo: github.com/abligh/claude-agent-supervisor)
 
 contrib/prosody/         # optional: mod_auth_xmpp_mcp.lua (server half of
                          #   credentials.py) + README — deployment material,
