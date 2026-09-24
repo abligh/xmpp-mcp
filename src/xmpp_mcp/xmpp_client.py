@@ -217,6 +217,7 @@ class XMPPClient:
         # XEP-0172 User Nickname, published over PEP (XEP-0163): the standard
         # place for a self-chosen friendly name.
         self.xmpp.register_plugin("xep_0172")
+        self.xmpp.register_plugin("xep_0292")
 
         # Advertise agent metadata on every available presence we send
         # (initial, set_presence, MUC joins) and in disco#info.
@@ -513,21 +514,33 @@ class XMPPClient:
     # --- friendly name --------------------------------------------------------
 
     async def _publish_nick(self) -> None:
-        """Publish the friendly name as a XEP-0172 nickname over PEP.
+        """Publish the friendly name over PEP: as a XEP-0172 nickname, and as
+        the nickname in a XEP-0292 vCard.
 
-        Best effort: PEP is optional on a server, and peers find the name in
-        our presence anyway. The node is made world-readable where the server
-        supports publish-options, since agents that only share a room have no
-        presence subscription to satisfy PEP's default access model.
+        Clients differ in which they read for a contact's name: many desktop
+        clients look only at the vCard, and servers such as Prosody
+        (mod_vcard_legacy) answer old-style vcard-temp requests from the
+        vCard4 node. Best effort: PEP is optional on a server, and peers find
+        the name in our presence anyway. Nodes are made world-readable where
+        the server supports publish-options, since agents that only share a
+        room have no presence subscription to satisfy PEP's default access
+        model.
         """
-        nick = self.xmpp.plugin["xep_0172"]
-        try:
+        name = self.friendly_name
+        for label, publish in (
+            ("XEP-0172 nickname",
+             lambda **kw: self.xmpp.plugin["xep_0172"].publish_nick(name, **kw)),
+            ("vCard",
+             lambda **kw: self.xmpp.plugin["xep_0292"].publish_vcard(
+                 full_name=name, nickname=name, **kw)),
+        ):
             try:
-                await nick.publish_nick(self.friendly_name, options=_open_access_form(self.xmpp))
-            except (IqError, IqTimeout):
-                await nick.publish_nick(self.friendly_name)
-        except (IqError, IqTimeout, NotConnectedError) as exc:
-            logger.debug("Could not publish XEP-0172 nickname: %s", exc)
+                try:
+                    await publish(options=_open_access_form(self.xmpp))
+                except (IqError, IqTimeout):
+                    await publish()
+            except (IqError, IqTimeout, NotConnectedError) as exc:
+                logger.debug("Could not publish %s: %s", label, exc)
 
     def _on_claude_session_change(self, old: ClaudeSession, new: ClaudeSession) -> Any:
         if new.status != old.status and not self._presence_explicit:

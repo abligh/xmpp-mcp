@@ -542,6 +542,11 @@ Channel/agent mode adds `XMPP_CHANNEL`, `XMPP_AGENT_NAME`, `XMPP_AGENT_ID`,
     will never log in. `mod_auth_xmpp_mcp` only says yes for JIDs that have
     logged in (a `xmpp_mcp_seen` store); anything else bounces with
     `service-unavailable`.
+48. **Desktop clients name contacts from the vCard, not XEP-0172.** A
+    published XEP-0172 nickname is invisible to clients such as Beagle, which
+    show the bare JID instead. xmpp-mcp also publishes a XEP-0292 vCard4
+    with the friendly name (open access); Prosody's `mod_vcard_legacy` then
+    answers old-style vcard-temp requests from it.
 47. **`connection_failed` fires per attempt, too** (like `failed_auth`, #17).
     Without a pinned host slixmpp works through SRV records — or, with none,
     probes the domain with direct TLS on 5222 and *then* STARTTLS. Treating

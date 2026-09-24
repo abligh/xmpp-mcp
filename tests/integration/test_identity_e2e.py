@@ -104,6 +104,37 @@ async def test_a_rename_propagates(spawn_agent, lab: LabHandle) -> None:
     assert (await rev.next_event())["content"] == "hello again"
 
 
+async def test_people_see_the_name_in_the_agents_vcard(spawn_agent, lab: LabHandle) -> None:
+    """Desktop clients name a contact from its vCard, not from presence."""
+    VC4 = "{urn:ietf:params:xml:ns:vcard-4.0}"
+    agent = await spawn_agent("vc", claude_name="Reviewer")
+
+    async with lab.raw("alice") as alice:
+        alice._client.register_plugin("xep_0292")
+        alice._client.register_plugin("xep_0054")
+
+        async def vcard4_nick():
+            try:
+                iq = await alice._client.plugin["xep_0292"].retrieve_vcard(agent.jid)
+            except Exception:  # noqa: BLE001 - not published yet
+                return None
+            el = iq.xml.find(f".//{VC4}nickname/{VC4}text")
+            return el.text if el is not None else None
+
+        assert await _until(vcard4_nick) == "Reviewer"
+        if lab.name == "prosody":
+            # mod_vcard_legacy answers the old vcard-temp request from it.
+            iq = await alice._client.plugin["xep_0054"].get_vcard(agent.jid)
+            assert iq["vcard_temp"]["NICKNAME"] in ("Reviewer", ["Reviewer"])
+
+        _rename(agent.session_file, "Critic", "user")
+
+        async def renamed():
+            return await vcard4_nick() == "Critic"
+
+        await _until(renamed)
+
+
 async def test_same_friendly_name_twice(spawn_agent, lab: LabHandle) -> None:
     """Two sessions called Reviewer: both get in, and the name becomes ambiguous."""
     room = _directory(lab)
