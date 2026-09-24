@@ -1,5 +1,7 @@
 # Prosody 13 for people and xmpp-mcp agents, with its own Let's Encrypt
-# certificates. Built from contrib/prosody/ (see docker-compose.yaml):
+# certificates. Built from this directory, plus the directory holding
+# mod_auth_xmpp_mcp.lua as the build context "module" (XMPP_MCP_MODULE_DIR in
+# .env; by default the parent, contrib/prosody/):
 #
 #   docker compose build
 #
@@ -13,14 +15,14 @@ RUN apt-get update \
  && apt-get install -y --no-install-recommends certbot \
  && rm -rf /var/lib/apt/lists/*
 
-COPY mod_auth_xmpp_mcp.lua /etc/prosody/modules/
-COPY deploy/prosody.cfg.lua /etc/prosody/prosody.cfg.lua
-COPY deploy/xmpp-entrypoint deploy/xmpp-certs deploy/xmpp-mcp-host-key /usr/local/bin/
+COPY --from=module mod_auth_xmpp_mcp.lua /etc/prosody/modules/
+COPY prosody.cfg.lua /etc/prosody/prosody.cfg.lua
+COPY xmpp-entrypoint xmpp-certs xmpp-mcp-host-key /usr/local/bin/
 RUN chmod 0755 /usr/local/bin/xmpp-entrypoint /usr/local/bin/xmpp-certs \
                /usr/local/bin/xmpp-mcp-host-key
 
 # Port 80 is only for certbot's HTTP-01 answers (published on localhost and
-# reached through the host's Apache); 5222 is XMPP.
+# reached through the host's web server); 5222 is XMPP.
 EXPOSE 80 5222
 
 ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/xmpp-entrypoint"]

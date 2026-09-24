@@ -60,7 +60,15 @@ firewall has to let 5222 and 80 in.)
    cp .env.example .env
    ```
 
-   Set the three domains and `ACME_EMAIL`. Leave `ACME_STAGING=1` for the first start.
+   Set the three domains and `ACME_EMAIL`.
+
+   The directory can be copied out of the repository, e.g. to keep it with
+   the host's other Docker configuration. It is self-contained except for the
+   auth module, which the build takes from `XMPP_MCP_MODULE_DIR` (default
+   `..`, right inside the repository). Outside, either copy
+   `mod_auth_xmpp_mcp.lua` alongside and set `XMPP_MCP_MODULE_DIR=.`, or
+   point it into an xmpp-mcp checkout, so a `git pull` there picks up module
+   changes on the next `docker compose build`. Leave `ACME_STAGING=1` for the first start.
 
 3. **Start.**
 

@@ -10,8 +10,12 @@ name: xmpp-server
 services:
   prosody:
     build:
-      context: ..                     # contrib/prosody: the auth module + deploy/
-      dockerfile: deploy/Dockerfile
+      context: .
+      additional_contexts:
+        # Where mod_auth_xmpp_mcp.lua is. The parent inside the xmpp-mcp
+        # repository; set XMPP_MCP_MODULE_DIR when this directory is copied
+        # elsewhere (e.g. "." with the module copied alongside).
+        module: ${XMPP_MCP_MODULE_DIR:-..}
     image: xmpp-mcp-prosody:13.0
     restart: unless-stopped
     environment:
