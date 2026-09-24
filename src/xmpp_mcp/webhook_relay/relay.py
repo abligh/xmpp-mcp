@@ -431,14 +431,13 @@ class WebhookRelay:
             if problem is not None:
                 return problem
 
-        msg_id = scrub(provider.delivery_id(request.headers) or "")[:128]
-        if msg_id and self._seen_ids.maxlen and self.settings.dedupe_size:
-            if msg_id in self._seen_ids:
-                self.duplicates += 1
-                logger.warning("Dropped duplicate delivery %s", msg_id)
-                return web.json_response({"status": "duplicate", "id": msg_id})
-            self._seen_ids.append(msg_id)
-        msg_id = msg_id or uuid.uuid4().hex
+        delivery_id = scrub(provider.delivery_id(request.headers) or "")[:128]
+        dedupe = bool(delivery_id and self.settings.dedupe_size)
+        if dedupe and delivery_id in self._seen_ids:
+            self.duplicates += 1
+            logger.warning("Dropped duplicate delivery %s", delivery_id)
+            return web.json_response({"status": "duplicate", "id": delivery_id})
+        msg_id = delivery_id or uuid.uuid4().hex
 
         payload_json: str | None = None
         if payload is not None:
@@ -461,6 +460,11 @@ class WebhookRelay:
                 container = None
         if self.queue.maxsize - self.queue.qsize() < len(routing.targets):
             return web.json_response({"error": "queue full, retry later"}, status=503)
+        # Only now is the delivery accepted, so only now is its ID "seen":
+        # recorded earlier, a refused request's retry would be answered
+        # "duplicate" and taken for a success.
+        if dedupe:
+            self._seen_ids.append(delivery_id)
         for i, target in enumerate(routing.targets):
             # One stanza per target; ids stay unique but share the delivery ID.
             item_id = msg_id if len(routing.targets) == 1 else f"{msg_id}-{i + 1}"

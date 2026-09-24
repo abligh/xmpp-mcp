@@ -434,3 +434,26 @@ async def test_a_verbatim_body_is_still_scrubbed_and_limited() -> None:
         "Content-Type": "text/plain", "X-XMPP-Verbatim": "1"})
     body = relay.queue.get_nowait().body
     assert body.startswith("a�b") and body.endswith("…[truncated]")
+
+
+async def test_a_refused_delivery_is_not_remembered_as_seen() -> None:
+    """Regression: the ID was recorded before the queue-full check, so the
+    retry of a 503 came back "duplicate" — which a sender reads as success."""
+    relay = _relay(queue_size=1)
+    headers = {"X-Webhook-Delivery": "w-1", "Content-Type": "text/plain"}
+    assert (await _post(relay, f"/agent/{AGENT}", data="fills the queue"))[0] == 200
+    status, _ = await _post(relay, f"/agent/{AGENT}", data="x", headers=headers)
+    assert status == 503
+    relay.queue.get_nowait()  # the queue drains
+    status, got = await _post(relay, f"/agent/{AGENT}", data="x", headers=headers)
+    assert status == 200 and got["status"] == "queued"
+
+
+async def test_a_name_refused_up_front_does_not_use_up_its_delivery_id() -> None:
+    relay = _relay(directory_room=ROOM)
+    _ready(relay)
+    headers = {"X-Webhook-Delivery": "w-2", "Content-Type": "text/plain"}
+    assert (await _post(relay, "/agent/Reviewer", data="x", headers=headers))[0] == 404
+    _occupant(relay, "Reviewer", "Reviewer", "sess-r", "sess-r@xmpp.test/x")
+    status, got = await _post(relay, "/agent/Reviewer", data="x", headers=headers)
+    assert status == 200 and got["status"] == "queued"
