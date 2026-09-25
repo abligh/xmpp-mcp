@@ -334,7 +334,11 @@ addressing, never for the sender gate.
 
 **Presence follows the session's status.** Claude Code records whether the
 session is `busy` (a turn in progress) or `idle`; the agent mirrors that as
-`dnd`/"busy" or available/"idle", so `list_agents` shows who is free.
+`dnd`/"busy" or available/"idle", so `list_agents` shows who is free. Idle
+presence also carries XEP-0319's `<idle xmlns="urn:xmpp:idle:1" since="…"/>`:
+when the session went idle, from the session file's own `updatedAt` (else
+when xmpp-mcp saw the change). It doesn't move while the session stays idle,
+and an explicit `set_presence` never carries it.
 Messages to a busy agent are still delivered and wait for its next turn. An
 explicit `set_presence` takes over from then on.
 
@@ -530,6 +534,31 @@ in `WEBHOOK_ALLOWED_TARGETS`), `404` / `409` (a name nobody or several hold),
 `413` (body too large), `503` (queue full, or the directory not loaded yet).
 "Queued" is not "delivered": delivery is at-most-once and the queue does not
 survive a relay restart. `GET /healthz` reports connection state and counters.
+
+**`GET /directory`** lists the agents in `WEBHOOK_DIRECTORY_ROOM`: who is in
+the fleet, and busy or idle since when. It needs the same credential as a
+POST, since it reveals the fleet.
+
+```json
+{"room": "agents@conference.example.com", "as_of": "2026-09-25T10:30:00Z",
+ "relay_started": "2026-09-25T08:00:00Z", "complete": true,
+ "agents": [{"name": "Reviewer", "jid": "3f2a….host1@agents.example.com",
+             "agent_id": "3f2a…", "host": "host1", "nick": "Reviewer",
+             "show": "available", "status": "idle",
+             "idle_since": "2026-09-25T09:12:40Z", "busy_since": null,
+             "present_since": "2026-09-25T08:00:03Z"}]}
+```
+
+- Only occupants carrying xmpp-mcp's agent extension are listed, not people
+  or relays. Two holding one name are both listed.
+- `status` is `busy`, `idle` or `other`. `idle_since` is the agent's own
+  XEP-0319 stamp, on its clock, or null. `busy_since` and `present_since` are
+  when the relay saw the change, on its clock, and reset when it restarts. So
+  a streak can only look shorter than it is, and `relay_started` tells you
+  when that happened.
+- Until the relay has joined the room it answers `503`, reason
+  `directory-not-ready`, never an empty list, which would read as "nobody is
+  alive". With no directory room configured: `400`, `no-directory`.
 
 ### Providers (what is source-specific)
 

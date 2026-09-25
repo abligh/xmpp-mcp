@@ -26,12 +26,15 @@ sender gate uses the server-authenticated JID, never these attributes.
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from typing import Any
 
 from slixmpp import JID, Presence
 from slixmpp.xmlstream import ElementBase
 
 AGENT_NS = "urn:xmpp-mcp:agent:0"
+# XEP-0319 (Last User Interaction in Presence): when an idle agent went idle.
+IDLE_NS = "urn:xmpp:idle:1"
 
 # Presence types that describe availability. Everything else (unavailable,
 # subscription management, probes, errors) must not carry agent metadata.
@@ -58,6 +61,30 @@ def read_agent_info(pres: Presence) -> dict[str, str] | None:
     if el is None:
         return None
     return {k: el.get(k, "") for k in ("id", "name", "name-source", "host")}
+
+
+def idle_stamp(when: datetime) -> str:
+    """XEP-0082 DateTime, UTC with a Z, whole seconds: XEP-0319's ``since``."""
+    return when.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def read_idle_since(pres: Presence) -> str | None:
+    """The XEP-0319 ``since`` on ``pres``, normalised to UTC, or ``None``.
+
+    Self-asserted by the peer, like the agent extension, and dropped if it
+    doesn't parse: a malformed stamp must not become a date.
+    """
+    el = pres.xml.find(f"{{{IDLE_NS}}}idle")
+    raw = el.get("since") if el is not None else None
+    if not raw:
+        return None
+    try:
+        when = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if when.tzinfo is None:
+        return None  # XEP-0082 requires a zone; guessing one would mislead
+    return idle_stamp(when)
 
 
 class PresenceCache:
@@ -91,6 +118,7 @@ class PresenceCache:
             "status": pres["status"] or "",
             "agent": read_agent_info(pres),
             "real_jid": real_jid,
+            "idle_since": read_idle_since(pres),
         }
 
     def get(self, full_jid: str) -> dict[str, Any] | None:

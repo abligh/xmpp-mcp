@@ -71,6 +71,10 @@ class ClaudeSession:
     name_source: str | None
     status: str | None
     how: str  # which discovery step found it, for the startup log
+    # When Claude Code last wrote the file (its own `updatedAt`, ms since the
+    # epoch). A status change is such a write, so on a change to idle this is
+    # when the session went idle, to the millisecond, not to our poll.
+    updated_at: float | None = None
 
     @property
     def mtime_ns(self) -> int:
@@ -101,6 +105,7 @@ def read_session(path: Path, how: str = "path") -> ClaudeSession | None:
     source = data.get("nameSource")
     status = data.get("status")
     pid = data.get("pid")
+    updated = data.get("updatedAt")
     return ClaudeSession(
         path=path,
         pid=pid if isinstance(pid, int) else None,
@@ -111,6 +116,8 @@ def read_session(path: Path, how: str = "path") -> ClaudeSession | None:
         name_source=source if isinstance(source, str) and source else None,
         status=status if isinstance(status, str) and status else None,
         how=how,
+        updated_at=(updated / 1000 if isinstance(updated, (int, float))
+                    and not isinstance(updated, bool) and updated > 0 else None),
     )
 
 

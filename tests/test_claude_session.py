@@ -428,3 +428,68 @@ async def test_a_nick_in_a_message_names_a_sender_we_cannot_otherwise_see() -> N
     assert [g["sender_name"] for g in got] == ["Zed", "Zed"]
     # ...and that name is enough to write back.
     assert c.resolve_address("zed") == "sess-z.host9@xmpp.test"
+
+
+# --- XEP-0319: when an idle session went idle ---------------------------------
+
+IDLE = "{urn:xmpp:idle:1}idle"
+
+
+def _idle_el(c: XMPPClient):
+    return c._stamp_agent_presence(c.xmpp.make_presence()).xml.find(IDLE)
+
+
+async def test_idle_presence_says_since_when(tmp_path: Path, monkeypatch) -> None:
+    """The time comes from Claude Code's own `updatedAt`, not our poll."""
+    path = _write(tmp_path, 7, status="busy", updatedAt=1_790_000_000_000)
+    c = _client(tmp_path)
+    c._presence = ("dnd", "busy")
+    assert _idle_el(c) is None  # busy: no idle element
+    monkeypatch.setattr(c.xmpp, "is_connected", lambda: False)
+    w = SessionWatcher(read_session(path), c._on_claude_session_change)
+    _bump(path, status="idle", updatedAt=1_790_000_600_000)  # 2026-09-21T14:23:20Z
+    w.poll()
+    assert c._presence == (None, "idle")
+    assert _idle_el(c).get("since") == "2026-09-21T14:23:20Z"
+
+
+async def test_since_does_not_move_while_the_session_stays_idle(
+        tmp_path: Path, monkeypatch) -> None:
+    path = _write(tmp_path, 7, status="idle", updatedAt=1_790_000_000_000)
+    c = _client(tmp_path)
+    c._presence = (None, "idle")
+    monkeypatch.setattr(c.xmpp, "is_connected", lambda: False)
+    first = _idle_el(c).get("since")
+    w = SessionWatcher(read_session(path), c._on_claude_session_change)
+    for i in range(3):  # other writes to the file (a rename) bump updatedAt
+        _bump(path, updatedAt=1_790_000_000_000 + (i + 1) * 60_000)
+        w.poll()
+    assert _idle_el(c).get("since") == first
+
+
+async def test_busy_again_clears_since(tmp_path: Path, monkeypatch) -> None:
+    path = _write(tmp_path, 7, status="idle", updatedAt=1_790_000_000_000)
+    c = _client(tmp_path)
+    monkeypatch.setattr(c.xmpp, "is_connected", lambda: False)
+    w = SessionWatcher(read_session(path), c._on_claude_session_change)
+    _bump(path, status="busy", updatedAt=1_790_000_100_000)
+    w.poll()
+    assert c._idle_since is None and _idle_el(c) is None
+
+
+async def test_no_updated_at_means_since_now_and_never_the_future(tmp_path: Path) -> None:
+    from datetime import datetime, timezone
+    _write(tmp_path, 7, status="idle")  # older Claude Code: no updatedAt
+    c = _client(tmp_path)
+    assert abs((datetime.now(timezone.utc) - c._idle_since).total_seconds()) < 5
+    _write(tmp_path, 7, status="idle", updatedAt=4_000_000_000_000)  # year 2096
+    c = _client(tmp_path)
+    assert c._idle_since <= datetime.now(timezone.utc)
+
+
+async def test_an_explicit_presence_carries_no_idle_stamp(tmp_path: Path, monkeypatch) -> None:
+    _write(tmp_path, 7, status="idle", updatedAt=1_790_000_000_000)
+    c = _client(tmp_path)
+    monkeypatch.setattr(c.xmpp, "send_presence", lambda **kw: None)
+    c.set_presence(None, "idle")  # the agent's own words, not the session's state
+    assert _idle_el(c) is None

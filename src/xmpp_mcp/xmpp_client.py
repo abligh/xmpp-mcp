@@ -20,6 +20,7 @@ import ssl
 from collections import deque
 from collections.abc import Callable
 from datetime import datetime, timezone
+from xml.etree import ElementTree as ET
 from typing import Any
 
 from slixmpp import JID, ClientXMPP, Presence
@@ -30,7 +31,15 @@ from slixmpp.xmlstream import register_stanza_plugin
 from slixmpp.xmlstream.handler import Callback
 from slixmpp.xmlstream.matcher import StanzaPath
 
-from .agents import AGENT_NS, AgentInfo, PresenceCache, best_presence, is_available
+from .agents import (
+    AGENT_NS,
+    IDLE_NS,
+    AgentInfo,
+    PresenceCache,
+    best_presence,
+    idle_stamp,
+    is_available,
+)
 from .claude_session import ClaudeSession, SessionWatcher
 from .config import Settings
 from .credentials import CredentialError, HostKey, load_host_key
@@ -78,6 +87,17 @@ def parse_jid(value: str, what: str = "JID") -> JID:
     if not jid.domain:
         raise XMPPError(f"Invalid {what} {value!r}: missing domain")
     return jid
+
+
+def _went_idle_at(session: ClaudeSession | None) -> datetime | None:
+    """When ``session`` became idle, if it is idle: Claude Code's own write
+    time for the file, else now. Never in the future (clocks can disagree)."""
+    if session is None or session.status != "idle":
+        return None
+    now = datetime.now(timezone.utc)
+    if session.updated_at is None:
+        return now
+    return min(now, datetime.fromtimestamp(session.updated_at, timezone.utc))
 
 
 def _session_presence(session: ClaudeSession | None) -> tuple[str | None, str | None]:
@@ -189,6 +209,10 @@ class XMPPClient:
         # Presence follows the Claude Code session's busy/idle status until an
         # explicit set_presence says otherwise.
         self._presence_explicit = False
+        # When the session went idle (XEP-0319 `since` on idle presence), or
+        # None while it isn't. Set on the change to idle and kept while it
+        # stays idle, so observers can tell "idle 6 h" from "idle 6 s".
+        self._idle_since: datetime | None = _went_idle_at(session)
         # XEP-0172 §4.2: our nick goes in the *first* message to a contact.
         # Bare JIDs already told our current name (reset on rename).
         self._nick_sent: set[str] = set()
@@ -512,6 +536,13 @@ class XMPPClient:
                 if self.name_source:
                     info["name-source"] = self.name_source
                 info["host"] = s.agent_host
+            # XEP-0319: only on the automatic idle presence. An explicit
+            # set_presence is the agent speaking, not the session's state.
+            if (self._idle_since is not None and not self._presence_explicit
+                    and self._presence == (None, "idle")
+                    and stanza.xml.find(f"{{{IDLE_NS}}}idle") is None):
+                ET.SubElement(stanza.xml, f"{{{IDLE_NS}}}idle",
+                              {"since": idle_stamp(self._idle_since)})
         return stanza
 
     # --- friendly name --------------------------------------------------------
@@ -548,6 +579,8 @@ class XMPPClient:
                 logger.debug("Could not publish %s: %s", label, exc)
 
     def _on_claude_session_change(self, old: ClaudeSession, new: ClaudeSession) -> Any:
+        if new.status != old.status:
+            self._idle_since = _went_idle_at(new)
         if new.status != old.status and not self._presence_explicit:
             # busy/idle becomes presence, so list_agents shows who is free.
             show, status = _session_presence(new)

@@ -470,3 +470,112 @@ async def test_a_404_for_a_path_the_relay_has_no_route_for_has_no_reason() -> No
         assert resp.status == 404 and resp.content_type != "application/json"
     finally:
         await client.close()
+
+
+# --- GET /directory -------------------------------------------------------------
+
+
+def _presence(relay: WebhookRelay, nick: str, *, name: str | None = None, real: str,
+              status: str = "idle", show: str | None = None, since: str | None = None,
+              ptype: str | None = None) -> None:
+    from xml.etree import ElementTree as ET
+    pres = relay.xmpp.make_presence(pfrom=f"{ROOM}/{nick}", pto="webhook@xmpp.test/r",
+                                    pstatus=status, pshow=show, ptype=ptype)
+    if name:
+        ET.SubElement(pres.xml, "{urn:xmpp-mcp:agent:0}agent",
+                      {"id": f"id-{nick}", "name": name, "host": "h1"})
+    if since:
+        ET.SubElement(pres.xml, "{urn:xmpp:idle:1}idle", {"since": since})
+    x = ET.SubElement(pres.xml, "{http://jabber.org/protocol/muc#user}x")
+    ET.SubElement(x, "{http://jabber.org/protocol/muc#user}item", {"jid": real})
+    relay._on_room_presence(pres)
+
+
+async def _directory(relay: WebhookRelay, **headers: str) -> tuple[int, dict[str, Any]]:
+    client = await _client(relay)
+    try:
+        resp = await client.get("/directory", headers=headers)
+        return resp.status, await resp.json()
+    finally:
+        await client.close()
+
+
+async def test_the_directory_lists_agents_with_their_times() -> None:
+    relay = _relay(directory_room=ROOM)
+    _ready(relay)
+    _presence(relay, "Reviewer", name="Reviewer", real="r@xmpp.test/x",
+              since="2026-09-25T08:00:00+01:00")
+    _presence(relay, "Builder", name="Builder", real="b@xmpp.test/y", status="busy", show="dnd")
+    _presence(relay, "alice", real="alice@xmpp.test/z")  # a person: not the fleet
+    status, got = await _directory(relay)
+    assert status == 200 and got["complete"] is True and got["room"] == ROOM
+    assert got["relay_started"] <= got["as_of"]
+    by = {a["name"]: a for a in got["agents"]}
+    assert set(by) == {"Reviewer", "Builder"}
+    r, b = by["Reviewer"], by["Builder"]
+    assert (r["status"], r["idle_since"], r["busy_since"]) == ("idle", "2026-09-25T07:00:00Z", None)
+    assert (r["jid"], r["agent_id"], r["host"], r["nick"]) == (
+        "r@xmpp.test", "id-Reviewer", "h1", "Reviewer")
+    assert (b["status"], b["show"], b["idle_since"]) == ("busy", "dnd", None)
+    assert b["busy_since"] and b["present_since"]
+
+
+async def test_busy_since_holds_while_busy_and_clears_when_idle(monkeypatch) -> None:
+    from datetime import datetime, timedelta, timezone
+    from xmpp_mcp.webhook_relay import relay as relay_mod
+
+    t = [datetime(2026, 9, 25, 9, 0, tzinfo=timezone.utc)]
+
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return t[0]
+
+    monkeypatch.setattr(relay_mod, "datetime", Clock)
+    relay = _relay(directory_room=ROOM)
+    _ready(relay)
+    _presence(relay, "B", name="B", real="b@xmpp.test/y", status="busy")
+    t[0] += timedelta(hours=2)
+    _presence(relay, "B", name="B", real="b@xmpp.test/y", status="busy")  # still busy
+    _, got = await _directory(relay)
+    assert got["agents"][0]["busy_since"] == "2026-09-25T09:00:00Z"
+    _presence(relay, "B", name="B", real="b@xmpp.test/y", status="idle")
+    _, got = await _directory(relay)
+    assert got["agents"][0]["busy_since"] is None
+    assert got["agents"][0]["present_since"] == "2026-09-25T09:00:00Z"
+    _presence(relay, "B", real="b@xmpp.test/y", ptype="unavailable")
+    assert relay._seen == {}  # left: forgotten
+
+
+async def test_two_holders_of_one_name_are_both_listed() -> None:
+    relay = _relay(directory_room=ROOM)
+    _ready(relay)
+    _presence(relay, "Reviewer", name="Reviewer", real="a@xmpp.test/x")
+    _presence(relay, "Reviewer (h2)", name="Reviewer", real="b@xmpp.test/y")
+    _, got = await _directory(relay)
+    assert sorted(a["jid"] for a in got["agents"]) == ["a@xmpp.test", "b@xmpp.test"]
+
+
+async def test_the_directory_is_never_an_empty_200_before_it_loads() -> None:
+    relay = _relay(directory_room=ROOM)
+    relay.online.set()  # connected, room not joined yet
+    status, got = await _directory(relay)
+    assert status == 503 and got["reason"] == "directory-not-ready"
+    status, got = await _directory(_relay())
+    assert status == 400 and got["reason"] == "no-directory"
+
+
+async def test_the_directory_needs_the_token() -> None:
+    relay = _relay(directory_room=ROOM, token="s3cret")
+    _ready(relay)
+    assert (await _directory(relay))[0] == 401
+    assert (await _directory(relay, **{"X-Webhook-Token": "s3cret"}))[0] == 200
+
+
+@pytest.mark.parametrize("since", ["yesterday", "2026-09-25T08:00:00"])  # no zone
+async def test_a_malformed_since_is_null_not_a_guess(since: str) -> None:
+    relay = _relay(directory_room=ROOM)
+    _ready(relay)
+    _presence(relay, "R", name="R", real="r@xmpp.test/x", since=since)
+    _, got = await _directory(relay)
+    assert got["agents"][0]["idle_since"] is None

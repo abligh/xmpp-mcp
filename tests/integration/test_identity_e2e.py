@@ -221,6 +221,41 @@ async def test_envelope_to_a_friendly_name(named_relay, spawn_agent) -> None:
     assert '"deploy":"done"' in ev["content"] and '"xmpp"' not in ev["content"]
 
 
+async def test_the_directory_shows_idle_since_and_busy_since(
+    named_relay, spawn_agent,
+) -> None:
+    """designs/0069 over the real wire: the agent stamps XEP-0319 on idle
+    presence from Claude Code's updatedAt; the relay times the busy streak."""
+    import json
+
+    relay, server, directory = named_relay
+    rev = await spawn_agent("rev", "--join", directory, claude_name="Reviewer")
+    data = json.loads(rev.session_file.read_text())
+    data.update(status="busy", updatedAt=1_790_000_000_000)
+    rev.session_file.write_text(json.dumps(data))
+
+    async def agent() -> dict:
+        async with aiohttp.ClientSession() as http:
+            resp = await http.get(server.make_url("/directory"),
+                                  headers={"X-Webhook-Token": "t0ken"})
+            assert resp.status == 200
+            got = await resp.json()
+        return next((a for a in got["agents"] if a["name"] == "Reviewer"), {})
+
+    async def is_(status: str) -> bool:
+        return (await agent()).get("status") == status
+
+    await _until(lambda: is_("busy"))
+    busy = await agent()
+    assert busy["busy_since"] and busy["idle_since"] is None and busy["jid"] == rev.jid
+    data.update(status="idle", updatedAt=1_790_000_600_000)
+    rev.session_file.write_text(json.dumps(data))
+    await _until(lambda: is_("idle"))
+    idle = await agent()
+    assert idle["idle_since"] == "2026-09-21T14:23:20Z"  # Claude Code's own write time
+    assert idle["busy_since"] is None
+
+
 # --- names without a shared room; busy/idle; rooms --------------------------------
 
 

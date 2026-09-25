@@ -22,6 +22,7 @@ import signal
 import ssl
 import uuid
 from collections import deque
+from datetime import datetime, timezone
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -29,7 +30,7 @@ from aiohttp import web
 from slixmpp import ClientXMPP
 from slixmpp.exceptions import IqError, IqTimeout, PresenceError
 
-from ..agents import PresenceCache
+from ..agents import PresenceCache, idle_stamp
 from ..credentials import load_host_key
 from . import providers
 from .auth import authorised
@@ -93,6 +94,11 @@ class WebhookRelay:
         self.routes = load_routes(settings.routes) if settings.routes else []
         # Agents seen in the directory room, for friendly-name targets.
         self.directory = PresenceCache()
+        # What the relay itself saw of each occupant (keyed by occupant JID):
+        # when it appeared and when it last turned busy. On the relay's clock,
+        # so both reset when it restarts; `started` lets callers tell.
+        self.started = datetime.now(timezone.utc)
+        self._seen: dict[str, dict[str, datetime | None]] = {}
         # Recently seen delivery IDs, newest last. A GitHub signature covers
         # the body only — not the target — so without this a captured signed
         # delivery could be replayed at any JID, for ever.
@@ -126,7 +132,7 @@ class WebhookRelay:
         # groupchat bounce. Forget the room so the next delivery re-joins.
         self.xmpp.add_event_handler("message_error", self._on_stanza_error)
         self.xmpp.add_event_handler("presence_error", self._on_stanza_error)
-        self.xmpp.add_event_handler("groupchat_presence", self.directory.update)
+        self.xmpp.add_event_handler("groupchat_presence", self._on_room_presence)
 
     # --- XMPP lifecycle -------------------------------------------------------
 
@@ -148,6 +154,7 @@ class WebhookRelay:
         self.xmpp.send_presence()
         self._rooms.clear()  # occupancy never survives a stream
         self.directory.clear()
+        self._seen.clear()
         if self.settings.directory_room:
             try:
                 await self._ensure_joined(self.settings.directory_room)
@@ -155,6 +162,21 @@ class WebhookRelay:
                 logger.warning("Could not join directory room: %s", exc)
         self.online.set()
         logger.info("XMPP session established as %s", self.xmpp.boundjid.full)
+
+    def _on_room_presence(self, pres: Any) -> None:
+        """Keep the directory, and the relay's own timings, up to date."""
+        self.directory.update(pres)
+        key = pres["from"].full
+        entry = self.directory.get(key)
+        if entry is None:  # left the room
+            self._seen.pop(key, None)
+            return
+        now = datetime.now(timezone.utc)
+        seen = self._seen.setdefault(key, {"present_since": now, "busy_since": None})
+        if status_of(entry) == "busy":
+            seen["busy_since"] = seen["busy_since"] or now
+        else:
+            seen["busy_since"] = None
 
     def _on_failed_auth(self, _event: Any) -> None:
         logger.error("XMPP authentication failed — check WEBHOOK_XMPP_JID / WEBHOOK_XMPP_PASSWORD")
@@ -483,6 +505,53 @@ class WebhookRelay:
             "targets": [{"to": t.jid, "kind": t.kind} for t in routing.targets],
         })
 
+    async def handle_directory(self, request: web.Request) -> web.Response:
+        """The agents in the directory room: who, and busy or idle since when.
+
+        Behind the same credential as posting, since it lists the fleet. Only
+        occupants carrying xmpp-mcp's agent extension are listed (people and
+        relays aren't agents), and two holding one name are both listed, so a
+        caller sees what a 409 would be about.
+        """
+        if not authorised(self.settings, providers.GENERIC, request.headers, b""):
+            return web.json_response({"error": "unauthorised"}, status=401)
+        room = self.settings.directory_room
+        if not room:
+            return web.json_response(
+                {"error": "no WEBHOOK_DIRECTORY_ROOM configured", "reason": "no-directory"},
+                status=400)
+        if not self.directory_ready:
+            # Not loaded is not empty: a 200 with no agents reads as "nobody
+            # is alive".
+            return web.json_response(
+                {"error": "directory room not loaded yet, retry",
+                 "reason": "directory-not-ready"}, status=503, headers={"Retry-After": "5"})
+        agents = []
+        for nick, entry in sorted(self.directory.resources(room).items()):
+            info = entry.get("agent")
+            if not info:
+                continue
+            seen = self._seen.get(f"{room}/{nick}", {})
+            agents.append({
+                "name": info.get("name") or nick,
+                "jid": entry.get("real_jid"),
+                "agent_id": info.get("id") or None,
+                "host": info.get("host") or None,
+                "nick": nick,
+                "show": entry["show"],
+                "status": status_of(entry),
+                "idle_since": entry.get("idle_since"),
+                "busy_since": _stamp(seen.get("busy_since")),
+                "present_since": _stamp(seen.get("present_since")),
+            })
+        return web.json_response({
+            "room": room,
+            "as_of": idle_stamp(datetime.now(timezone.utc)),
+            "relay_started": idle_stamp(self.started),
+            "complete": True,
+            "agents": agents,
+        })
+
     async def handle_health(self, _request: web.Request) -> web.Response:
         return web.json_response(
             {
@@ -502,9 +571,20 @@ class WebhookRelay:
     def make_app(self) -> web.Application:
         app = web.Application(client_max_size=self.settings.max_request_bytes)
         app.router.add_get("/healthz", self.handle_health)
+        app.router.add_get("/directory", self.handle_directory)
         app.router.add_post("/", self.handle_webhook)
         app.router.add_post("/{kind:agent|room}/{jid:.+}", self.handle_webhook)
         return app
+
+
+def status_of(entry: dict[str, Any]) -> str:
+    """``busy``, ``idle`` or ``other``, from xmpp-mcp's presence status text."""
+    text = (entry.get("status") or "").strip().lower()
+    return text if text in ("busy", "idle") else "other"
+
+
+def _stamp(when: datetime | None) -> str | None:
+    return idle_stamp(when) if when else None
 
 
 async def serve(settings: RelaySettings) -> None:
