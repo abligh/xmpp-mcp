@@ -578,6 +578,23 @@ Channel/agent mode adds `XMPP_CHANNEL`, `XMPP_AGENT_NAME`, `XMPP_AGENT_ID`,
     (`server.keep_the_handshake`). The e2e helper opens every channel agent
     with the probe, like Claude Code.
 
+52. **Claude Code continues a session in the background as a fork, with
+    everything inherited.** Ctrl-C twice (or the supervisor's own stop) while
+    a background task is running makes Claude Code 2.1.282 fork the session
+    into a daemon-run background session (`"kind": "bg"`,
+    `CLAUDE_CODE_SESSION_KIND=bg`; a `continued-in` record in the parent's
+    transcript). The fork has a new session ID and the parent's name,
+    command line (`--channels`) and environment, so it logged in as a second
+    agent with the same name, and wakes by name got 409. In a background
+    session the server is dormant: no XMPP, no channel, no tools
+    (`XMPP_BACKGROUND_SESSIONS=true` opts in).
+53. **Take a file watcher's baseline from when the file was read, not when
+    watching starts.** Claude Code writes `idle` a moment after start. A
+    server that read the session file just before that, and then started a
+    watcher that stat()ed it afresh, never saw the change, and published
+    presence with no busy/idle status until the session next changed state.
+    `read_session` records `read_mtime_ns` before reading.
+
 ## Test markers
 
 - `not docker and not integration` → fast unit tests, no network/Docker

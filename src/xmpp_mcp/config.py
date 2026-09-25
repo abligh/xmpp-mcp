@@ -157,6 +157,15 @@ class Settings(BaseSettings):
             "message to Claude Code as a notifications/claude/channel event"
         ),
     )
+    xmpp_background_sessions: bool = Field(
+        False,
+        description=(
+            "Connect even inside a Claude Code background session "
+            "(CLAUDE_CODE_SESSION_KIND=bg). Off: such a session is a fork that "
+            "inherited its parent's channels, and would join as a second agent "
+            "under the parent's name"
+        ),
+    )
     xmpp_channel_label_sender: bool = Field(
         True,
         description=(

@@ -493,3 +493,18 @@ async def test_an_explicit_presence_carries_no_idle_stamp(tmp_path: Path, monkey
     monkeypatch.setattr(c.xmpp, "send_presence", lambda **kw: None)
     c.set_presence(None, "idle")  # the agent's own words, not the session's state
     assert _idle_el(c) is None
+
+
+async def test_a_write_between_reading_and_watching_is_not_missed(
+        tmp_path: Path, monkeypatch) -> None:
+    """Regression: the watcher took its baseline mtime when it started, not
+    when the file was read. Claude Code writes `idle` a moment after start,
+    so a server that had read the file just before sat on the startup
+    status: its presence said neither busy nor idle until the next change."""
+    path = _write(tmp_path, 7, status="busy")
+    first = read_session(path)            # the server reads at startup...
+    _bump(path, status="idle")            # ...Claude Code writes idle...
+    seen: list[str | None] = []
+    w = SessionWatcher(first, lambda old, new: seen.append(new.status))  # ...then we watch
+    assert w.poll() is True and seen == ["idle"]
+    assert w.poll() is False              # and only once

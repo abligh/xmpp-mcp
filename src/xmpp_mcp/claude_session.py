@@ -75,6 +75,11 @@ class ClaudeSession:
     # epoch). A status change is such a write, so on a change to idle this is
     # when the session went idle, to the millisecond, not to our poll.
     updated_at: float | None = None
+    # The file's mtime as it was *before* it was read. A watcher that takes
+    # its baseline later can miss a write made in between: Claude Code
+    # writes `idle` a moment after start, and a server that read the file
+    # just before that kept the startup status (none) until the next change.
+    read_mtime_ns: int = -1
 
     @property
     def mtime_ns(self) -> int:
@@ -93,6 +98,7 @@ def config_dir(env: Mapping[str, str] | None = None) -> Path:
 def read_session(path: Path, how: str = "path") -> ClaudeSession | None:
     """Parse one session file; ``None`` if it is missing or not usable."""
     try:
+        read_mtime_ns = path.stat().st_mtime_ns  # before reading: see read_mtime_ns
         data = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return None
@@ -118,6 +124,7 @@ def read_session(path: Path, how: str = "path") -> ClaudeSession | None:
         how=how,
         updated_at=(updated / 1000 if isinstance(updated, (int, float))
                     and not isinstance(updated, bool) and updated > 0 else None),
+        read_mtime_ns=read_mtime_ns,
     )
 
 
@@ -216,7 +223,9 @@ class SessionWatcher:
         self.session = session
         self._on_change = on_change
         self._interval = interval
-        self._mtime = session.mtime_ns
+        # What we last read, not what the file is now: a write since then is
+        # a change to pick up on the first poll.
+        self._mtime = session.read_mtime_ns
         self._task: asyncio.Task[None] | None = None
 
     def start(self) -> None:
@@ -239,11 +248,12 @@ class SessionWatcher:
         mtime = self.session.mtime_ns
         if mtime == self._mtime:
             return False
-        self._mtime = mtime
         fresh = read_session(self.session.path, self.session.how)
         # A vanished or rewritten-for-another-session file is not a rename.
         if fresh is None or fresh.session_id != self.session.session_id:
+            self._mtime = mtime
             return False
+        self._mtime = fresh.read_mtime_ns
         old, self.session = self.session, fresh
         if (old.name, old.name_source, old.status) == (fresh.name, fresh.name_source, fresh.status):
             return False

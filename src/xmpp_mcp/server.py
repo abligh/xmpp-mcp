@@ -96,6 +96,8 @@ def create_server(**overrides: Any) -> FastMCP:
     changes what the server declares at ``initialize``: the
     ``claude/channel`` capability and channel-specific instructions.
     """
+    if _in_background_session() and not _background_allowed(overrides):
+        return _dormant_server()
     settings = load_settings(**overrides)
     instructions = _BASE_INSTRUCTIONS
     experimental: dict[str, dict[str, Any]] = {}
@@ -127,6 +129,37 @@ def create_server(**overrides: Any) -> FastMCP:
     admin.register(mcp)
 
     return mcp
+
+
+def _in_background_session() -> bool:
+    return os.environ.get("CLAUDE_CODE_SESSION_KIND", "").lower() == "bg"
+
+
+def _background_allowed(overrides: dict[str, Any]) -> bool:
+    if overrides.get("xmpp_background_sessions") is not None:
+        return bool(overrides["xmpp_background_sessions"])
+    return os.environ.get("XMPP_BACKGROUND_SESSIONS", "").lower() in ("1", "true", "yes")
+
+
+def _dormant_server() -> FastMCP:
+    """The server a Claude Code background session gets: no XMPP at all.
+
+    Claude Code continues a session in the background by forking it (a new
+    session ID, the parent's name, its whole command line and environment),
+    so the fork would log in with its own derived JID and join every room as
+    a second agent with the parent's name. Wakes addressed to that name then
+    get a 409 and reach neither. The fork is the parent's job runner, not a
+    new agent, so it gets a server with no connection, no channel and no
+    tools. XMPP_BACKGROUND_SESSIONS=true opts back in.
+    """
+    logger.info("Claude Code background session: XMPP left off "
+                "(XMPP_BACKGROUND_SESSIONS=true to connect anyway)")
+    return FastMCP(
+        "xmpp-mcp",
+        instructions=("XMPP is off in this Claude Code background session: it "
+                      "is a fork of an agent, and only the agent itself is on "
+                      "the network."),
+    )
 
 
 def keep_the_handshake(mcp: FastMCP) -> None:

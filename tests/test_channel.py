@@ -507,3 +507,21 @@ def test_channel_mode_serves_only_the_handshake_era() -> None:
     plain, chan = create_server(), create_server(xmpp_channel=True, xmpp_agent_name="Rev")
     assert "run" not in vars(plain._mcp_server)  # the SDK's dual-era run
     assert vars(chan._mcp_server)["run"].__qualname__.startswith("keep_the_handshake")
+
+
+@pytest.mark.usefixtures("_env")
+async def test_a_background_session_stays_off_xmpp(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Claude Code continues a session in the background as a fork with the
+    parent's name and channels: it must not join as a second agent."""
+    from xmpp_mcp.server import create_server
+
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_KIND", "bg")
+    dormant = create_server(xmpp_channel=True, xmpp_agent_name="Rev")
+    assert await dormant.list_tools() == []
+    assert "claude/channel" not in (dormant.experimental_capabilities or {})
+    assert "background session" in (dormant.instructions or "")
+    monkeypatch.setenv("XMPP_BACKGROUND_SESSIONS", "true")
+    assert await create_server(xmpp_channel=True, xmpp_agent_name="Rev").list_tools()
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_KIND", "interactive")
+    monkeypatch.delenv("XMPP_BACKGROUND_SESSIONS")
+    assert await create_server(xmpp_channel=True, xmpp_agent_name="Rev").list_tools()
