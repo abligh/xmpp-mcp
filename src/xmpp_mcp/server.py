@@ -19,6 +19,7 @@ from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from typing import Any
 
 from fastmcp import FastMCP
+from mcp.server.runner import serve_loop
 
 from .channel import (
     CHANNEL_CAPABILITY, ChannelBridge, ChannelSessionMiddleware, SenderGate,
@@ -114,6 +115,7 @@ def create_server(**overrides: Any) -> FastMCP:
     )
     if settings.xmpp_channel:
         mcp.add_middleware(ChannelSessionMiddleware(CTX_CHANNEL))
+        keep_the_handshake(mcp)
 
     messaging.register(mcp)
     agents.register(mcp)
@@ -125,6 +127,31 @@ def create_server(**overrides: Any) -> FastMCP:
     admin.register(mcp)
 
     return mcp
+
+
+def keep_the_handshake(mcp: FastMCP) -> None:
+    """Serve only the ``initialize`` handshake era, never the 2026-07-28 wire.
+
+    ``Server.run`` serves both eras, and the client's first request decides
+    which: a modern client opens with an enveloped ``server/discover``, which
+    commits the connection to 2026-07-28. That wire has no unsolicited
+    notification path, so Claude Code (2.1.282 on) connects happily and then
+    drops every channel message ("Channel notifications skipped: connection
+    negotiated a modern protocol revision with no unsolicited notification
+    path"). ``serve_loop`` is the SDK's handshake-only driver: an enveloped
+    probe gets an RPC error, and the client falls back to ``initialize``,
+    where channel pushes work.
+    """
+    low = mcp._mcp_server  # noqa: SLF001 - fastmcp exposes no hook for this
+
+    async def run(read_stream: Any, write_stream: Any, initialization_options: Any,
+                  raise_exceptions: bool = False) -> None:
+        async with low.lifespan(low) as lifespan_state:
+            await serve_loop(low, read_stream, write_stream, lifespan_state=lifespan_state,
+                             init_options=initialization_options,
+                             raise_exceptions=raise_exceptions)
+
+    low.run = run  # type: ignore[method-assign]
 
 
 def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:

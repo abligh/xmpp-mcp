@@ -496,3 +496,14 @@ def test_the_bridge_labels_by_default() -> None:
 def test_instructions_explain_the_label_only_when_on() -> None:
     assert "who sent it" in channel_instructions("a@x", "A")
     assert "who sent it" not in channel_instructions("a@x", "A", labelled=False)
+
+
+@pytest.mark.usefixtures("_env")
+def test_channel_mode_serves_only_the_handshake_era() -> None:
+    """Regression: Claude Code 2.1.282 negotiated 2026-07-28, whose wire has no
+    unsolicited notifications, and every channel message was dropped."""
+    from xmpp_mcp.server import create_server
+
+    plain, chan = create_server(), create_server(xmpp_channel=True, xmpp_agent_name="Rev")
+    assert "run" not in vars(plain._mcp_server)  # the SDK's dual-era run
+    assert vars(chan._mcp_server)["run"].__qualname__.startswith("keep_the_handshake")

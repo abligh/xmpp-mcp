@@ -622,8 +622,10 @@ async def spawn_agent(lab: LabHandle, tmp_path: Path):
             agent_name = claude_name
         if channel:
             cli.append("--channel")
+        # Channel agents open the way Claude Code does since 2.1.282: a
+        # 2026-07-28 probe first, which they must refuse (see keep_the_handshake).
         proc = StdioMCP([*cli, *args], env={**agent_env, **(env or {})},
-                        cwd=tmp_path)  # cwd: no stray .env
+                        cwd=tmp_path, probe_modern=channel)  # cwd: no stray .env
         proc.agent_name = agent_name  # type: ignore[attr-defined]
         proc.jid = jid  # type: ignore[attr-defined]
         proc.session_file = session_file  # type: ignore[attr-defined]

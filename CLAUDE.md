@@ -404,9 +404,8 @@ Channel/agent mode adds `XMPP_CHANNEL`, `XMPP_AGENT_NAME`, `XMPP_AGENT_ID`,
     (`tests/integration/helpers/stdio_mcp.py`), exactly like Claude Code.
     Related: `fastmcp.Client` defaults to the modern (2026-07-28) protocol,
     which has **no `initialize` handshake at all** — pass `mode="legacy"` to
-    exercise the handshake path. Claude Code likewise refuses to register a
-    channel server that negotiates 2026-07-28, so don't set
-    `MCP_PROTOCOL_NEGOTIATION=auto` for agent sessions.
+    exercise the handshake path. See #51: Claude Code itself now probes for
+    2026-07-28 first.
 21. **Notifications may only be pushed after `notifications/initialized`.**
     The session's standalone outbound channel isn't usable before the client
     finishes initialising, and the MCP lifecycle forbids it. `ChannelBridge`
@@ -565,6 +564,19 @@ Channel/agent mode adds `XMPP_CHANNEL`, `XMPP_AGENT_NAME`, `XMPP_AGENT_ID`,
     `mod_agent_roster`, people are in agents' rosters by name, so the sender
     label and `list_agents` use "alice" where they used the bare JID; tests
     that compare labels accept either.
+
+51. **Claude Code 2.1.282+ opens with a 2026-07-28 probe, and that wire drops
+    channel pushes.** fastmcp's `Server.run` serves both protocol eras, and
+    the client's first request decides: an enveloped `server/discover`
+    commits the connection to 2026-07-28. That wire has no unsolicited
+    notification path, so the session connects, lists tools, and silently
+    loses every channel message. Claude Code's MCP log is the only trace
+    ("Channel notifications skipped: connection negotiated a modern protocol
+    revision…"). Refusing the probe alone isn't enough: it has already
+    locked the era, and the fallback `initialize` then gets -32022. Channel
+    mode therefore runs the SDK's handshake-only `serve_loop`
+    (`server.keep_the_handshake`). The e2e helper opens every channel agent
+    with the probe, like Claude Code.
 
 ## Test markers
 

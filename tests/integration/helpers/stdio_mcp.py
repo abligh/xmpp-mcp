@@ -35,8 +35,13 @@ class ToolCallError(RuntimeError):
 class StdioMCP:
     """One ``xmpp-mcp`` subprocess plus a JSON-RPC session over its stdio."""
 
-    def __init__(self, args: list[str], env: dict[str, str], cwd: Path) -> None:
+    def __init__(self, args: list[str], env: dict[str, str], cwd: Path,
+                 probe_modern: bool = False) -> None:
         self.args = args
+        # Open like a 2026-era client (Claude Code 2.1.282 on): an enveloped
+        # server/discover first, then initialize if that is refused.
+        self.probe_modern = probe_modern
+        self.discover_reply: dict[str, Any] | None = None
         self.env = {k: v for k, v in os.environ.items() if not k.startswith(_SCRUB)}
         self.env.update(env)
         self.cwd = cwd
@@ -67,6 +72,14 @@ class StdioMCP:
         ]
         # The server connects to XMPP inside its lifespan, *before* it answers
         # initialize — hence the generous timeout.
+        if self.probe_modern:
+            self.discover_reply = await self.raw_request("server/discover", {"_meta": {
+                "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+                "io.modelcontextprotocol/clientInfo": {"name": "xmpp-mcp-tests", "version": "0"},
+                "io.modelcontextprotocol/clientCapabilities": {},
+            }}, timeout=timeout)
+            if "error" not in self.discover_reply:
+                raise RuntimeError(f"server accepted the 2026-07-28 probe: {self.discover_reply}")
         self.initialize_result = await self.request(
             "initialize",
             {
@@ -109,6 +122,15 @@ class StdioMCP:
     async def request(
         self, method: str, params: dict[str, Any] | None = None, timeout: float = 15.0
     ) -> dict[str, Any]:
+        reply = await self.raw_request(method, params, timeout)
+        if "error" in reply:
+            raise RuntimeError(f"{method} failed: {reply['error']}")
+        return reply["result"]
+
+    async def raw_request(
+        self, method: str, params: dict[str, Any] | None = None, timeout: float = 15.0
+    ) -> dict[str, Any]:
+        """The whole JSON-RPC reply, error or result."""
         rid = next(self._ids)
         fut: asyncio.Future[dict[str, Any]] = asyncio.get_running_loop().create_future()
         self._pending[rid] = fut
@@ -119,9 +141,7 @@ class StdioMCP:
             raise TimeoutError(
                 f"{method} timed out; server stderr:\n{self.stderr_tail()}"
             ) from None
-        if "error" in reply:
-            raise RuntimeError(f"{method} failed: {reply['error']}")
-        return reply["result"]
+        return reply
 
     async def call(
         self, tool: str, arguments: dict[str, Any] | None = None, timeout: float = 15.0
