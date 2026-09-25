@@ -326,3 +326,25 @@ async def test_a_room_that_hides_its_members(monkeypatch: pytest.MonkeyPatch) ->
     monkeypatch.setattr(c, "disco_items", refuse)
     with pytest.raises(XMPPError, match="join_room to see them"):
         await c.room_members(ROOM)
+
+
+async def test_a_room_is_joined_with_our_busy_or_idle_state(monkeypatch) -> None:
+    """Regression: the join presence carried no show/status, and busy/idle
+    only re-announces on a change, so the room (and the relay's directory)
+    saw neither busy nor idle until the session's state next changed."""
+    c = _client()
+    muc = c.xmpp.plugin["xep_0045"]
+    seen: list = []
+
+    async def fake_join(room, nick, **kw):
+        seen.append(kw.get("presence_options"))
+
+    monkeypatch.setattr(muc, "join_muc_wait", fake_join)
+    monkeypatch.setattr(muc, "get_roster", lambda room: [])
+    c._presence = (None, "idle")
+    await c.join_room(ROOM, "me")
+    c._presence = ("dnd", "busy")
+    await c.join_room("other@conference.xmpp.test", "me")
+    c._presence = (None, None)
+    await c.join_room("third@conference.xmpp.test", "me")
+    assert seen == [{"pstatus": "idle"}, {"pshow": "dnd", "pstatus": "busy"}, None]

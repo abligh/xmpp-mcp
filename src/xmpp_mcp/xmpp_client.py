@@ -959,11 +959,18 @@ class XMPPClient:
             candidates += [f"{nick} ({s.agent_host})",
                            f"{nick} ({(s.xmpp_agent_id or JID(s.xmpp_jid).user)[:8]})"]
         muc = self.xmpp.plugin["xep_0045"]
+        # Join with our current show/status. The room keeps the presence we
+        # join with until we send another, and busy/idle only re-announces on
+        # a change, so an agent that joined without them read neither busy
+        # nor idle there for as long as its state held.
+        show, status = self._presence
+        joining_as: dict[str, Any] = {k: v for k, v in (("pshow", show), ("pstatus", status)) if v}
         for attempt, candidate in enumerate(candidates, 1):
             self._joining.add(room)
             try:
                 await muc.join_muc_wait(
                     room, candidate, maxstanzas=0, timeout=s.xmpp_connect_timeout,
+                    presence_options=dict(joining_as) or None,  # type: ignore[arg-type]
                 )
                 nick = candidate
                 break

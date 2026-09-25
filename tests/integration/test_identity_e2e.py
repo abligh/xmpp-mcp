@@ -232,7 +232,6 @@ async def test_the_directory_shows_idle_since_and_busy_since(
     rev = await spawn_agent("rev", "--join", directory, claude_name="Reviewer")
     data = json.loads(rev.session_file.read_text())
     data.update(status="busy", updatedAt=1_790_000_000_000)
-    rev.session_file.write_text(json.dumps(data))
 
     async def agent() -> dict:
         async with aiohttp.ClientSession() as http:
@@ -245,6 +244,10 @@ async def test_the_directory_shows_idle_since_and_busy_since(
     async def is_(status: str) -> bool:
         return (await agent()).get("status") == status
 
+    # Straight after joining, with no change yet: the join presence itself
+    # must say idle (the spawned session starts idle).
+    await _until(lambda: is_("idle"))
+    rev.session_file.write_text(json.dumps(data))
     await _until(lambda: is_("busy"))
     busy = await agent()
     assert busy["busy_since"] and busy["idle_since"] is None and busy["jid"] == rev.jid
