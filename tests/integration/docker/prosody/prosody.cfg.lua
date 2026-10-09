@@ -42,10 +42,10 @@ log = {
 	{ levels = { min = "info" }, to = "console" };
 }
 
--- People and the agents in the Everyone room in each other's contact lists,
+-- People and the agents in the Everyone rooms in each other's contact lists,
 -- named and kept current (contrib/prosody/mod_agent_roster.lua, loaded on both
--- hosts below).
-agent_roster_room = "everyone@conference.xmpp.test"
+-- hosts below). Two rooms, as on a server shared by two projects.
+agent_roster_room = { "everyone@conference.xmpp.test", "other-everyone@conference.xmpp.test" }
 agent_roster_people_host = "xmpp.test"
 agent_roster_agents_host = "agents.xmpp.test"
 

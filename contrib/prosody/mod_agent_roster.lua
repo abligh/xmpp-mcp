@@ -1,8 +1,8 @@
 -- mod_agent_roster: people and agents in each other's contact lists, by name.
 --
 -- Load it on both VirtualHosts, the people's and the agents'. It puts
---   * every agent seen in the Everyone room into every person's roster, in
---     the group "Agents", named by the agent's nick in that room (which
+--   * every agent seen in any of the Everyone rooms into every person's
+--     roster, in the group "Agents", named by the agent's nick there (which
 --     xmpp-mcp keeps equal to the agent's friendly name), and
 --   * every person (every account on this host) into every agent's roster,
 --     in the group "People",
@@ -16,7 +16,12 @@
 -- agent_roster_keep seconds, so a restart does not make it flicker away.
 --
 -- Options (global, so both hosts see them):
---   agent_roster_room          the Everyone room, e.g. "everyone@conference.example.com"
+--   agent_roster_room          the Everyone room, e.g. "everyone@conference.example.com",
+--                              or a list of them, one per project, e.g.
+--                              { "everyone@conference.example.com",
+--                                "galatea-everyone@conference.example.com" }.
+--                              An agent in several is named by its nick in the
+--                              first one listed.
 --   agent_roster_people_host   the people's VirtualHost, e.g. "example.com"
 --   agent_roster_agents_host   the agents' VirtualHost, e.g. "agents.example.com"
 --   agent_roster_keep          seconds an absent agent stays listed (7 days)
@@ -29,13 +34,14 @@ local jid_bare = require "prosody.util.jid".bare;
 local rostermanager = require "prosody.core.rostermanager";
 local usermanager = require "prosody.core.usermanager";
 
-local room_jid = module:get_option_string("agent_roster_room");
+local rooms_option = module:get_option("agent_roster_room");
 local people_host = module:get_option_string("agent_roster_people_host");
 local agents_host = module:get_option_string("agent_roster_agents_host");
 local keep = module:get_option_number("agent_roster_keep", 7 * 24 * 3600);
 local agents_group = module:get_option_string("agent_roster_agents_group", "Agents");
 local people_group = module:get_option_string("agent_roster_people_group", "People");
-assert(room_jid, "mod_agent_roster: set agent_roster_room");
+local room_jids = type(rooms_option) == "table" and rooms_option or { rooms_option };
+assert(#room_jids > 0 and type(room_jids[1]) == "string", "mod_agent_roster: set agent_roster_room");
 assert(agents_host, "mod_agent_roster: set agent_roster_agents_host");
 assert(people_host, "mod_agent_roster: set agent_roster_people_host");
 local on_people_host = module.host == people_host;
@@ -44,7 +50,11 @@ if not on_people_host and module.host ~= agents_host then
 		module.host, people_host, agents_host);
 	return;
 end
-local _, muc_host = jid_split(room_jid);
+local muc_hosts = {}; -- each MUC service with a listed room, once
+for _, room_jid in ipairs(room_jids) do
+	local _, muc_host = jid_split(room_jid);
+	muc_hosts[muc_host] = true;
+end
 
 -- The agents we list: bare JID -> { name = nick, seen = time, present = bool }.
 local store = module:open_store("agent_roster");
@@ -112,17 +122,20 @@ local function push(host, jid, make)
 end
 
 local function refresh()
-	local mod_muc = prosody.hosts[muc_host] and prosody.hosts[muc_host].modules.muc;
-	local room = mod_muc and mod_muc.get_room_from_jid(room_jid);
 	local now = os.time();
 	local present = {};
-	if room then
-		for _, occupant in room:each_occupant() do
-			local bare = jid_bare(occupant.bare_jid);
-			local _, host = jid_split(bare);
-			if host == agents_host then
-				local _, _, nick = jid_split(occupant.nick);
-				present[bare] = nick;
+	for _, room_jid in ipairs(room_jids) do
+		local _, muc_host = jid_split(room_jid);
+		local mod_muc = prosody.hosts[muc_host] and prosody.hosts[muc_host].modules.muc;
+		local room = mod_muc and mod_muc.get_room_from_jid(room_jid);
+		if room then
+			for _, occupant in room:each_occupant() do
+				local bare = jid_bare(occupant.bare_jid);
+				local _, host = jid_split(bare);
+				if host == agents_host and not present[bare] then -- first room listed wins
+					local _, _, nick = jid_split(occupant.nick);
+					present[bare] = nick;
+				end
 			end
 		end
 	end
@@ -159,8 +172,10 @@ end
 
 if not on_people_host then return; end  -- the rest watches the room, for people
 
-module:context(muc_host):hook("muc-occupant-joined", function() module:add_timer(0, refresh); end);
-module:context(muc_host):hook("muc-occupant-left", function() module:add_timer(0, refresh); end);
+for muc_host in pairs(muc_hosts) do
+	module:context(muc_host):hook("muc-occupant-joined", function() module:add_timer(0, refresh); end);
+	module:context(muc_host):hook("muc-occupant-left", function() module:add_timer(0, refresh); end);
+end
 -- A nick change fires neither: look again every few seconds.
 module:add_timer(5, function() refresh(); return 5; end);
 

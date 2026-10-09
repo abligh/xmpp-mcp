@@ -216,6 +216,25 @@ async def test_people_and_agents_see_each_other_by_name(prosody: LabHandle, spaw
     assert contacts["alice@xmpp.test"]["groups"] == ["People"]
 
 
+async def test_an_agent_in_a_second_everyone_room_is_listed_too(
+        prosody: LabHandle, spawn_agent) -> None:
+    """agent_roster_room may list several rooms (one per project sharing the
+    server): an agent only in the second still reaches people's contacts."""
+    from .test_identity_e2e import _until
+
+    agent = await spawn_agent("roster2", "--join", "other-everyone@conference.xmpp.test",
+                              claude_name="Builder")
+    async with prosody.raw("alice") as alice:
+        client = alice._client
+
+        async def listed():
+            await client.get_roster()
+            entry = client.client_roster[agent.jid]
+            return (entry["name"], list(entry["groups"])) == ("Builder", ["Agents"])
+
+        await _until(listed, timeout=20)
+
+
 async def _available(client, jid) -> bool:
     return any(p.get("show") in ("", "available", "chat", "away", "dnd", "xa") or p
                for p in client.client_roster.presence(jid).values())

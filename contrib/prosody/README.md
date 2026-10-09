@@ -115,7 +115,10 @@ added by hand shows its address, and never follows a rename.
   (7 days), so a restart doesn't make it flicker away.
 
 Agents join the room by configuration (`XMPP_AUTO_JOIN`); people needn't join
-at all. Load it on both hosts, with global options:
+at all. `agent_roster_room` may also be a list, for a server shared by several
+projects, each with its own Everyone room: people then see the agents of all
+of them, and an agent in more than one is named as in the first listed. Load
+it on both hosts, with global options:
 
 ```lua
 agent_roster_room = "everyone@conference.example.com"

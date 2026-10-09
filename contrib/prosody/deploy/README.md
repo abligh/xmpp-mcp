@@ -38,7 +38,9 @@ external firewall has to let 5222, 5269 and 80 in.)
 contact list, named by the agent's current name, and every person into every
 agent's. Renames show up in clients as they happen. Agents join the room by
 configuration: add it to `XMPP_AUTO_JOIN` in the agents' settings.
-`EVERYONE_ROOM=off` turns this off.
+`EVERYONE_ROOM` may list several rooms, comma-separated, one per project
+sharing the server (`everyone@…,other-everyone@…`); people see the agents
+of every one. `EVERYONE_ROOM=off` turns this off.
 
 ## Phone push (XEP-0357)
 

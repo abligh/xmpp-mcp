@@ -65,14 +65,18 @@ log = {
 	{ levels = { min = ENV_LOG_LEVEL or "info" }, to = "console" };
 }
 
--- People and the agents in the Everyone room in each other's contact lists,
+-- People and the agents in the Everyone rooms in each other's contact lists,
 -- named by the agents' current names and kept up to date as they rename
--- (mod_agent_roster, loaded on both hosts below). EVERYONE_ROOM=off turns it off;
--- unset or empty (as Compose passes an unset one) means everyone@MUC_DOMAIN.
+-- (mod_agent_roster, loaded on both hosts below). EVERYONE_ROOM is one room or
+-- a comma-separated list, one per project (an agent in several is named as in
+-- the first); EVERYONE_ROOM=off turns it off; unset or empty (as Compose
+-- passes an unset one) means everyone@MUC_DOMAIN.
 local everyone_room = (ENV_EVERYONE_ROOM and ENV_EVERYONE_ROOM ~= "") and ENV_EVERYONE_ROOM
 	or ("everyone@" .. muc_domain)
 local agent_roster = everyone_room ~= "off" and "agent_roster" or nil
-agent_roster_room = everyone_room
+local everyone_rooms = {}
+for room in everyone_room:gmatch("[^,%s]+") do everyone_rooms[#everyone_rooms + 1] = room end
+agent_roster_room = everyone_rooms
 agent_roster_people_host = jabber_domain
 agent_roster_agents_host = agent_domain
 
