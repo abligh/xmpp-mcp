@@ -578,9 +578,10 @@ class WebhookRelay:
 
 
 def status_of(entry: dict[str, Any]) -> str:
-    """``busy``, ``idle`` or ``other``, from xmpp-mcp's presence status text."""
+    """``busy``, ``idle``, ``shell`` (the turn has ended, a background task
+    still runs) or ``other``, from xmpp-mcp's presence status text."""
     text = (entry.get("status") or "").strip().lower()
-    return text if text in ("busy", "idle") else "other"
+    return text if text in ("busy", "idle", "shell") else "other"
 
 
 def _stamp(when: datetime | None) -> str | None:

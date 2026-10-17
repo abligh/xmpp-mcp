@@ -89,10 +89,17 @@ def parse_jid(value: str, what: str = "JID") -> JID:
     return jid
 
 
+# Statuses in which the session's turn has ended: ``idle``, and ``shell`` —
+# what Claude Code writes when a turn ends while a background task it started
+# is still running (undocumented, like the rest of the file; gotcha #39).
+TURN_ENDED = ("idle", "shell")
+
+
 def _went_idle_at(session: ClaudeSession | None) -> datetime | None:
-    """When ``session`` became idle, if it is idle: Claude Code's own write
-    time for the file, else now. Never in the future (clocks can disagree)."""
-    if session is None or session.status != "idle":
+    """When ``session``'s turn ended, if it has (idle or shell): Claude Code's
+    own write time for the file, else now. Never in the future (clocks can
+    disagree)."""
+    if session is None or session.status not in TURN_ENDED:
         return None
     now = datetime.now(timezone.utc)
     if session.updated_at is None:
@@ -105,14 +112,16 @@ def _session_presence(session: ClaudeSession | None) -> tuple[str | None, str | 
 
     ``busy`` (a turn in progress) becomes ``dnd`` — the RFC 6121 §4.7.2.1
     value clients show as "busy"; messages are still delivered and simply
-    wait for the next turn. ``idle`` is plain available. Anything else is
-    left alone.
+    wait for the next turn. ``idle`` is plain available, and so is
+    ``shell`` (the turn has ended, a background task still runs), keeping
+    its own status text so observers can tell the two apart. Anything else
+    is left alone.
     """
     status = session.status if session else None
     if status == "busy":
         return "dnd", "busy"
-    if status == "idle":
-        return None, "idle"
+    if status in TURN_ENDED:
+        return None, status
     return None, None
 
 
@@ -536,10 +545,12 @@ class XMPPClient:
                 if self.name_source:
                     info["name-source"] = self.name_source
                 info["host"] = s.agent_host
-            # XEP-0319: only on the automatic idle presence. An explicit
-            # set_presence is the agent speaking, not the session's state.
+            # XEP-0319: only on the automatic idle (or shell) presence. An
+            # explicit set_presence is the agent speaking, not the session's
+            # state.
             if (self._idle_since is not None and not self._presence_explicit
-                    and self._presence == (None, "idle")
+                    and self._presence[0] is None
+                    and self._presence[1] in TURN_ENDED
                     and stanza.xml.find(f"{{{IDLE_NS}}}idle") is None):
                 ET.SubElement(stanza.xml, f"{{{IDLE_NS}}}idle",
                               {"since": idle_stamp(self._idle_since)})
@@ -580,9 +591,12 @@ class XMPPClient:
 
     def _on_claude_session_change(self, old: ClaudeSession, new: ClaudeSession) -> Any:
         if new.status != old.status:
-            self._idle_since = _went_idle_at(new)
+            # shell -> idle keeps the time: the turn ended only once.
+            if not (old.status in TURN_ENDED and new.status in TURN_ENDED
+                    and self._idle_since is not None):
+                self._idle_since = _went_idle_at(new)
         if new.status != old.status and not self._presence_explicit:
-            # busy/idle becomes presence, so list_agents shows who is free.
+            # busy/idle/shell becomes presence, so list_agents shows who is free.
             show, status = _session_presence(new)
             if (show, status) != self._presence and self.xmpp.is_connected():
                 self._announce(show, status)

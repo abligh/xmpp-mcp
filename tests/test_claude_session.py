@@ -342,6 +342,10 @@ def test_session_status_maps_to_presence(tmp_path: Path) -> None:
 
     assert _session_presence(read_session(_write(tmp_path, 1, status="busy"))) == ("dnd", "busy")
     assert _session_presence(read_session(_write(tmp_path, 2, status="idle"))) == (None, "idle")
+    # The turn has ended but a background task still runs: its own status.
+    shell = read_session(_write(tmp_path, 3, status="shell"))
+    assert _session_presence(shell) == (None, "shell")
+    assert _session_presence(read_session(_write(tmp_path, 4, status="new"))) == (None, None)
     assert _session_presence(None) == (None, None)
 
 
@@ -475,6 +479,44 @@ async def test_busy_again_clears_since(tmp_path: Path, monkeypatch) -> None:
     _bump(path, status="busy", updatedAt=1_790_000_100_000)
     w.poll()
     assert c._idle_since is None and _idle_el(c) is None
+
+
+async def test_shell_presence_says_when_the_turn_ended(tmp_path: Path, monkeypatch) -> None:
+    """`shell` (turn over, a background task still running) carries the
+    time the turn ended, like idle: a stuck task must not look busy."""
+    path = _write(tmp_path, 7, status="busy", updatedAt=1_790_000_000_000)
+    c = _client(tmp_path)
+    c._presence = ("dnd", "busy")
+    monkeypatch.setattr(c.xmpp, "is_connected", lambda: False)
+    w = SessionWatcher(read_session(path), c._on_claude_session_change)
+    _bump(path, status="shell", updatedAt=1_790_000_600_000)  # 2026-09-21T14:23:20Z
+    w.poll()
+    assert c._presence == (None, "shell")
+    assert _idle_el(c).get("since") == "2026-09-21T14:23:20Z"
+
+
+async def test_shell_then_idle_keeps_the_time_the_turn_ended(
+        tmp_path: Path, monkeypatch) -> None:
+    path = _write(tmp_path, 7, status="shell", updatedAt=1_790_000_000_000)
+    c = _client(tmp_path)
+    c._presence = (None, "shell")
+    monkeypatch.setattr(c.xmpp, "is_connected", lambda: False)
+    first = _idle_el(c).get("since")
+    w = SessionWatcher(read_session(path), c._on_claude_session_change)
+
+    def step(status: str, updated: int, n: int) -> None:
+        _bump(path, status=status, updatedAt=updated)
+        st = path.stat()  # writes this close together can share an mtime
+        os.utime(path, ns=(st.st_atime_ns, st.st_mtime_ns + n * 1_000_000_000))
+        assert w.poll() is True
+
+    step("idle", 1_790_003_600_000, 1)  # the task ends an hour later
+    assert c._presence == (None, "idle")
+    assert _idle_el(c).get("since") == first
+    step("busy", 1_790_003_700_000, 2)  # a new turn...
+    assert c._idle_since is None
+    step("shell", 1_790_003_800_000, 3)  # ...ends: a new time
+    assert _idle_el(c).get("since") == "2026-09-21T15:16:40Z"
 
 
 async def test_no_updated_at_means_since_now_and_never_the_future(tmp_path: Path) -> None:

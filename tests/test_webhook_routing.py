@@ -520,6 +520,22 @@ async def test_the_directory_lists_agents_with_their_times() -> None:
     assert b["busy_since"] and b["present_since"]
 
 
+async def test_the_directory_says_shell_and_since_when() -> None:
+    """`shell` (a turn ended, a background task still running) is passed
+    through with its time; any other status text is still `other`."""
+    relay = _relay(directory_room=ROOM)
+    _ready(relay)
+    _presence(relay, "Builder", name="Builder", real="b@xmpp.test/y", status="shell",
+              since="2026-09-25T07:00:00Z")
+    _presence(relay, "Odd", name="Odd", real="o@xmpp.test/y", status="away for lunch")
+    status, got = await _directory(relay)
+    by = {a["name"]: a for a in got["agents"]}
+    builder = by["Builder"]
+    assert (builder["status"], builder["idle_since"]) == ("shell", "2026-09-25T07:00:00Z")
+    assert by["Builder"]["busy_since"] is None
+    assert by["Odd"]["status"] == "other"
+
+
 async def test_busy_since_holds_while_busy_and_clears_when_idle(monkeypatch) -> None:
     from datetime import datetime, timedelta, timezone
     from xmpp_mcp.webhook_relay import relay as relay_mod
